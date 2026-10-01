@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Reverse ./install.sh: the ~/.local/bin links (only ones pointing here), the
+# window's icon and app entry, the
 # claude-chatview block in ~/.bashrc / ~/.zshrc, the fish functions, and the statusLine (put back
 # to what it was before install.sh, only if it is still the relay).
 #
@@ -33,6 +34,15 @@ for f in claude-chatview claude-chatview-statusline; do
   l="$BIN_DIR/$f"
   if [ -L "$l" ] && [ "$(readlink "$l")" = "$ROOT/bin/$f" ]; then LINKS+=("$l"); fi
 done
+l="$BIN_DIR/claude-chatview-shell"
+if [ -L "$l" ] && [ "$(readlink "$l")" = "$ROOT/shell/target/release/claude-chatview-shell" ]; then LINKS+=("$l"); fi
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+WINFILES=()
+for f in "$DATA/applications/claude-chatview-shell.desktop" \
+         "$DATA/icons/hicolor/256x256/apps/claude-chatview.png" \
+         "$DATA/icons/hicolor/scalable/apps/claude-chatview.svg"; do
+  [ -f "$f" ] && WINFILES+=("$f")
+done
 RCS=()
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   [ -f "$rc" ] && grep -qF "$MARK_BEGIN" "$rc" && RCS+=("$rc")
@@ -45,12 +55,13 @@ done
 STATUS=0
 if [ -f "$SETTINGS" ] && grep -q 'claude-chatview-statusline' "$SETTINGS"; then STATUS=1; fi
 
-if [ "${#LINKS[@]}" -eq 0 ] && [ "${#RCS[@]}" -eq 0 ] && [ "${#FISHF[@]}" -eq 0 ] && [ "$STATUS" = 0 ]; then
+if [ "${#LINKS[@]}" -eq 0 ] && [ "${#WINFILES[@]}" -eq 0 ] && [ "${#RCS[@]}" -eq 0 ] && [ "${#FISHF[@]}" -eq 0 ] && [ "$STATUS" = 0 ]; then
   say "nothing to undo."
   exit 0
 fi
 say "will:"
 for l in ${LINKS[@]+"${LINKS[@]}"}; do echo "  remove link $l"; done
+for f in ${WINFILES[@]+"${WINFILES[@]}"}; do echo "  remove $f"; done
 for ff in ${FISHF[@]+"${FISHF[@]}"}; do echo "  remove $ff"; done
 for rc in ${RCS[@]+"${RCS[@]}"}; do echo "  remove the claude-chatview block from $rc (backup: $rc.claude-chatview.bak)"; done
 [ "$STATUS" = 1 ] && echo "  restore your previous statusLine in $SETTINGS (backup: $SETTINGS.claude-chatview.bak)"
@@ -62,6 +73,7 @@ if [ "$YES" != 1 ]; then
 fi
 
 for l in ${LINKS[@]+"${LINKS[@]}"}; do rm -f "$l"; done
+for f in ${WINFILES[@]+"${WINFILES[@]}"}; do rm -f "$f"; done
 for ff in ${FISHF[@]+"${FISHF[@]}"}; do rm -f "$ff"; done
 for rc in ${RCS[@]+"${RCS[@]}"}; do
   cp "$rc" "$rc.claude-chatview.bak"

@@ -493,6 +493,7 @@ const taskTone = (status) => (status === 'running' ? 'running'
  *
  * @param {object} o
  * @param {(data: string) => void} o.send   keystrokes into this chat's pty
+ * @param {(data: string) => void} [o.submitText]  a chat message: text the server types, then Enter once drawn
  * @param {() => boolean} o.bracketed       does the TUI accept bracketed paste
  * @param {boolean} o.mac
  * @param {(ev: KeyboardEvent) => boolean} [o.keyFilter]  the pane's own keys
@@ -511,7 +512,7 @@ const taskTone = (status) => (status === 'running' ? 'running'
 /** A prompt longer than this is sent as a paste, never as typed keys. */
 const PASTE_OVER = 200;
 
-export function createChatView({ send, bracketed = () => true, mac = false, keyFilter = null,
+export function createChatView({ send, submitText = null, bracketed = () => true, mac = false, keyFilter = null,
                                  onOpenTask = null, onCloseTask = null,
                                  messageAgent = null, agentReachable = null, screen = null }) {
   const root = el('div', 'cchat');
@@ -1098,13 +1099,16 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     // Anything long goes as a bracketed PASTE too, not as typing: a long
     // single-line prompt typed in one burst reached Claude Code as its last
     // 56 characters only, while a 13-line paste arrived whole.
-    if (text.includes('\n') || text.length > PASTE_OVER) {
-      send(bracketed() ? `\x1b[200~${text}\x1b[201~` : text.replace(/\n/g, ' '));
-    } else {
-      send(text);
+    const payload = text.includes('\n') || text.length > PASTE_OVER
+      ? (bracketed() ? `\x1b[200~${text}\x1b[201~` : text.replace(/\n/g, ' '))
+      : text;
+    // The Enter is the server's to send (`Session.submit`): only once Claude
+    // Code has drawn the text, or it lands inside the paste as a newline.
+    if (submitText) submitText(payload);
+    else {
+      send(payload);
+      setTimeout(() => send('\r'), text.length > PASTE_OVER ? 250 : 60);
     }
-    // the Enter waits longer after a big paste so it lands after the paste
-    setTimeout(() => send('\r'), text.length > PASTE_OVER ? 250 : 60);
     stick = true;
   }
 

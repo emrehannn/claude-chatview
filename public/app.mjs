@@ -40,10 +40,10 @@ const CLOSE_AFTER_S = 3;
 /** Catppuccin Mocha, opaque: a transparent canvas leaves stale glyphs
  *  behind under some WebGL drivers. */
 const THEME = Object.freeze({
-  background: '#1e1e2e',
+  background: '#0b1630',
   foreground: '#cdd6f4',
   cursor: '#f5e0dc',
-  cursorAccent: '#1e1e2e',
+  cursorAccent: '#0b1630',
   selectionBackground: '#585b70',
   selectionForeground: '#cdd6f4',
   black: '#45475a',
@@ -79,6 +79,27 @@ const store = {
 };
 
 // ── keys ──────────────────────────────────────────────────────────────
+
+/** Inside the tab strip (`tabs.mjs`): this page is one tab's frame. */
+const embedded = window.parent !== window;
+const toParent = (msg) => { if (embedded) window.parent.postMessage(msg, location.origin); };
+
+/** The tab keys, handed to the tab strip: Ctrl+T new, Ctrl+W close,
+ *  Ctrl+Tab / Ctrl+PgDn next, Ctrl+Shift+Tab / Ctrl+PgUp previous,
+ *  Ctrl+1…9 that tab. They never reach Claude Code. */
+function tabKey(ev) {
+  if (!ev.ctrlKey || ev.metaKey || ev.altKey) return null;
+  const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+  if (!ev.shiftKey && (k === 't' || ev.code === 'KeyT')) return { op: 'new' };
+  if (!ev.shiftKey && (k === 'w' || ev.code === 'KeyW')) return { op: 'close' };
+  if (k === 'Tab') return { op: ev.shiftKey ? 'prev' : 'next' };
+  if (k === 'PageDown') return { op: 'next' };
+  if (k === 'PageUp') return { op: 'prev' };
+  const d = /^Digit([1-9])$/.exec(ev.code);
+  if (d && !ev.shiftKey) return { op: 'go', n: Number(d[1]) };
+  return null;
+}
+const isTabKey = (ev) => embedded && tabKey(ev) != null;
 
 /** Ctrl+` — the view toggle. Never reaches the pty (it would be NUL). */
 const isToggleKey = (ev) => ev.ctrlKey && !ev.metaKey && !ev.altKey
@@ -121,6 +142,8 @@ let ended = null;             // {code, signal} once Claude Code has exited
 let cols = 0;
 let rows = 0;
 let ptySize = null;           // the pty's size as the server last said
+let lastRunning = null;
+let serverSubmits = false;    // the server takes {t:'submit'} (its hello says so)       // last "Claude is working" told to the tab strip
 
 document.documentElement.style.setProperty('--cfont', `${fontSize}px`);
 
@@ -153,6 +176,9 @@ try {
 
 const view = createChatView({
   send: (data) => sendInput(data),
+  // a server older than `submit` gets the old way: text, then a timed Enter
+  submitText: (data) => (serverSubmits ? sendSubmit(data)
+    : (sendInput(data), setTimeout(() => sendInput('\r'), data.length > 200 ? 250 : 60))),
   bracketed: () => term.modes?.bracketedPasteMode ?? true,
   mac,
   keyFilter: (ev) => {
@@ -175,7 +201,7 @@ els.screen.append(view.root);
 
 term.onData((data) => sendInput(data));
 term.attachCustomKeyEventHandler((ev) => {
-  if (isToggleKey(ev) || isSuspendKey(ev)) {
+  if (isToggleKey(ev) || isSuspendKey(ev) || isTabKey(ev)) {
     if (ev.type === 'keydown') ev.preventDefault();
     return false;
   }
@@ -203,6 +229,23 @@ for (const type of ['keydown', 'keypress', 'keyup']) {
     if (type === 'keydown' && !ev.repeat) toggleView();
   }, true);
 }
+
+// The tab keys go to the tab strip, the same way.
+for (const type of ['keydown', 'keypress', 'keyup']) {
+  window.addEventListener(type, (ev) => {
+    const k = embedded ? tabKey(ev) : null;
+    if (!k) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    if (type === 'keydown' && !ev.repeat) toParent({ t: 'key', ...k });
+  }, true);
+}
+
+// the tab strip shows this tab: give it the keyboard
+window.addEventListener('message', (ev) => {
+  if (ev.source !== window.parent || ev.origin !== location.origin) return;
+  if (ev.data?.t === 'focus') { refit(); applyView({ focus: true }); }
+});
 
 // A printable key typed while nothing has the keyboard belongs to Claude.
 window.addEventListener('keydown', (ev) => {
@@ -259,6 +302,7 @@ function checkScreen() {
   let st;
   try { st = screenState(term); } catch { st = { normal: false, blank: false, running: false }; }
   view.setRunning(st.running);
+  if (st.running !== lastRunning) { lastRunning = st.running; toParent({ t: 'info', running: st.running }); }
   // walking the subagent panel for the chat view: the agent's transcript
   // is on the TUI for a moment, and the task view stays where it is
   if (driving) return;
@@ -329,7 +373,10 @@ function foot(text, cls = '') {
 
 function connect() {
   if (sock || ended) return;
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  // relative: a tab's page at /t/<id>/ talks to /t/<id>/ws
+  const wsUrl = new URL('ws', location.href);
+  wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(wsUrl);
   sock = ws;
   ws.onopen = () => {
     if (sock !== ws) return;
@@ -404,12 +451,22 @@ function sendInput(data) {
   wsSend({ t: 'input', data: text });
 }
 
+/** A chat message: the server types it and presses Enter once it is drawn. */
+function sendSubmit(data) {
+  const text = String(data).split('\x1a').join('');
+  if (!text || ended) return;
+  if (ptySize != null && ptySize !== `${cols}x${rows}`) refit();
+  wsSend({ t: 'submit', data: text });
+}
+
 function onFrame(msg) {
   switch (msg.t) {
     case 'hello':
+      serverSubmits = msg.submit === true;
       els.project.textContent = msg.cwdShown || msg.cwd || '';
       els.project.title = `claude ${(msg.argv || []).join(' ')}`;
       document.title = `Claude Code · ${msg.project || ''}`;
+      toParent({ t: 'info', project: msg.project || '' });
       break;
     case 'out':
       if (msg.replay) term.reset();
@@ -417,6 +474,7 @@ function onFrame(msg) {
       break;
     case 'state':
       alive = Boolean(msg.alive);
+      toParent({ t: 'info', alive });
       if (alive) foot('running');
       else if (msg.attach && !ended) foot('starting Claude Code…');
       break;
@@ -454,12 +512,14 @@ function onExit(msg) {
   const how = ended.signal ? `signal ${ended.signal}` : `exit ${ended.code}`;
   foot(`Claude Code ended (${how})`, ended.code ? 'err' : '');
   view.setRunning(false);
+  toParent({ t: 'info', ended: true, running: false });
   els.ended.hidden = false;
   let left = CLOSE_AFTER_S;
   let timer = null;
   const paint = () => {
     els.endedText.textContent = `Claude Code ended (${how}). `
-      + (timer ? `This window closes in ${left} s.` : 'You can close this window.');
+      + (timer ? `This ${embedded ? 'tab' : 'window'} closes in ${left} s.`
+        : `You can close this ${embedded ? 'tab (Ctrl+W)' : 'window'}.`);
   };
   // a clean exit closes the window; anything else stays up to be read
   if (ended.code === 0 && !ended.signal) {
@@ -468,7 +528,8 @@ function onExit(msg) {
       if (left <= 0) {
         clearInterval(timer);
         timer = null;
-        window.close();
+        if (embedded) toParent({ t: 'close' });
+        else window.close();
         paint();
         return;
       }

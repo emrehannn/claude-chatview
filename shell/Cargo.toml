@@ -1,0 +1,28 @@
+[package]
+name = "claude-chatview-shell"
+version = "0.1.0"
+edition = "2021"
+description = "The claude-chatview window: a transparent WebKitGTK window over the local chat page"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# the KWin blur request (src/blur.rs): GTK's own Wayland connection and surface
+[target.'cfg(target_os = "linux")'.dependencies]
+gdkwayland-sys = "0.18"
+gtk = "0.18"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -138,13 +138,27 @@ claude --resume           # the picker shows in the window's terminal
 claude-plain              # plain Claude Code, always
 ```
 
-One window is one Claude session, in the directory you started it from. It
-opens as an app window (no tabs, no address bar); set `CLAUDE_CHATVIEW_BROWSER`
-to pick the browser (`%u` is replaced by the URL).
+A window holds one Claude session per tab, in the directory you started it
+from; `Ctrl+T` opens a fresh Claude in a new tab. On Linux, when `cargo` is
+installed, `install.sh` builds the window (`shell/`, Rust + WebKitGTK):
+see-through, with KWin blurring the desktop behind it on KDE Plasma. Without
+it the page opens as a Chromium app window. While the window is open, the
+terminal you typed `claude` in is hidden (on Plasma) and comes back when the
+window's last Claude exits.
+
+| Setting | |
+|---|---|
+| `CLAUDE_CHATVIEW_BROWSER=cmd` | open the page with `cmd` instead (`%u` = the URL) |
+| `CLAUDE_CHATVIEW_SHELL=off` | Chromium instead of the see-through window |
+| `CLAUDE_CHATVIEW_BLUR=off` | a clear tint, no blur behind the window |
+| `CLAUDE_CHATVIEW_HIDE_TERMINAL=off` | leave the terminal where it is |
 
 | Key | |
 |---|---|
 | `` Ctrl+` `` | chat view ⇄ Claude Code's terminal (also the button top right; remembered) |
+| `Ctrl+T` / `Ctrl+W` | new chat tab / close this tab |
+| `Ctrl+Tab`, `Ctrl+PgDn` / `Ctrl+Shift+Tab`, `Ctrl+PgUp` | next / previous tab |
+| `Ctrl+1` … `Ctrl+9` | that tab (`Ctrl+9` = the last) |
 | `Enter` / `Shift+Enter` | send / new line |
 | `Esc` | interrupt |
 | `Ctrl+C` | Claude Code's Ctrl+C |
@@ -153,8 +167,9 @@ to pick the browser (`%u` is replaced by the URL).
 - Long prompts are sent as a paste, so nothing is lost.
 - Reloading the window is fine — the session keeps running and the screen is
   restored. Closing it stops Claude Code about 10 seconds later.
-- When Claude Code exits, the window says so and `claude-chatview` exits with
-  Claude Code's exit code.
+- When a tab's Claude Code exits, the tab says so and closes (after a clean
+  exit); `claude-chatview` exits once every tab's Claude has, with the last
+  exit code.
 
 **What runs plain.** Anything that is not an interactive session runs plain
 `claude` in your terminal, so pointing `claude` at this is safe: `-p` /

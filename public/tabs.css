@@ -1,0 +1,39 @@
+/*
+ * The tab strip: one window, a tab per Claude session. Each tab is its own
+ * page (`index.html` at /t/<id>/) in a frame; this page only owns the strip.
+ */
+.tabs-host { display: flex; flex-direction: column; }
+.strip { flex: 0 0 auto; display: flex; align-items: stretch; height: 26px; padding: 0;
+         background: #000; border-bottom: 1px solid rgba(255, 255, 255, .08);
+         overflow-x: auto; scrollbar-width: none; user-select: none; }
+.strip::-webkit-scrollbar { display: none; }
+/* square tabs, edge to edge, top of the bar to its bottom */
+.tab { flex: 0 1 200px; min-width: 70px; display: flex; align-items: center; gap: 6px;
+       margin: 0; padding: 0 4px 0 10px; border: 0; border-radius: 0;
+       border-right: 1px solid rgba(255, 255, 255, .08);
+       background: transparent; color: #7f849c; font: 11px var(--mono); cursor: pointer; }
+.tab:hover { color: #bac2de; background: rgba(255, 255, 255, .04); }
+.tab.active { color: #cdd6f4; background: rgba(137, 180, 250, .14); box-shadow: inset 0 -2px 0 #89b4fa; }
+.tab-dot { flex: 0 0 auto; font-size: .8em; color: #a6e3a1; }
+.tab[data-tone="working"] .tab-dot { color: #fab387; animation: tx-blink 1.2s ease-in-out infinite; }
+.tab[data-tone="ended"] .tab-dot { color: #6c7086; }
+.tab-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+             text-align: left; }
+.tab-x { flex: 0 0 auto; align-self: stretch; width: 22px; display: flex; align-items: center;
+         justify-content: center; color: #6c7086; }
+.tab-x:hover { color: #f38ba8; background: rgba(243, 139, 168, .12); }
+.strip-new { flex: 0 0 auto; width: 30px; margin: 0; border: 0; border-radius: 0;
+             border-right: 1px solid rgba(255, 255, 255, .08);
+             background: transparent; color: #7f849c; font: 15px/1 var(--mono); cursor: pointer; }
+.strip-new:hover { color: #cdd6f4; background: rgba(255, 255, 255, .08); }
+.frames { flex: 1 1 auto; min-height: 0; position: relative; }
+/* every frame keeps its size, hidden or not: a 0-size frame would shrink its pty */
+.frames iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+                 background: transparent; visibility: hidden; }
+.frames iframe.active { visibility: visible; }
+@media (prefers-reduced-motion: reduce) { .tab[data-tone="working"] .tab-dot { animation: none; } }
+
+/* the transparent window (shell.js): the strip is the only backdrop the host
+   page draws; each tab's page tints itself */
+html[data-shell="glass"] body.tabs-host { background: transparent; }
+html[data-shell="glass"] .strip { background: rgba(0, 0, 0, .55); }

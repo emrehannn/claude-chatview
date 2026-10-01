@@ -5,7 +5,8 @@
 #   ./install.sh --ask    ask before each optional step (default: yes)
 #
 # Checks node >= 18, installs the one npm dependency (node-pty), links bin/
-# into ~/.local/bin, and by default also:
+# into ~/.local/bin, on Linux builds the transparent window (shell/, needs
+# cargo) with its icon and app entry, and by default also:
 #   * sets the statusLine relay in ~/.claude/settings.json (the context bar),
 #     keeping your previous statusLine so the relay can still draw it;
 #   * makes `claude` open claude-chatview in bash, zsh and fish, plus
@@ -108,6 +109,46 @@ case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) say "note: $BIN_DIR is not on your PATH — add it in your shell's rc file." ;;
 esac
+
+# ── the window (Linux): shell/, a transparent, blurred WebKitGTK window ─
+# Built with cargo; without cargo (or on macOS) the page opens in a Chromium
+# app window instead, as before.
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+if [ "$(uname -s)" = Linux ]; then
+  echo
+  if ! command -v cargo >/dev/null 2>&1; then
+    say "cargo not found — skipping the transparent window (the page opens in Chromium)."
+    say "  to get it: sudo pacman -S rust   (or https://rustup.rs), then ./install.sh again"
+  elif ask "Build the transparent window (Rust, WebKitGTK; a few minutes the first time)?"; then
+    say "building shell/ (cargo build --release) ..."
+    if ( cd "$ROOT/shell" && cargo build --release ); then
+      ln -sfn "$ROOT/shell/target/release/claude-chatview-shell" "$BIN_DIR/claude-chatview-shell"
+      mkdir -p "$APPS_DIR" "$ICONS_DIR/256x256/apps" "$ICONS_DIR/scalable/apps"
+      cp "$ROOT/shell/icons/icon.png" "$ICONS_DIR/256x256/apps/claude-chatview.png"
+      cp "$ROOT/shell/icons/icon.svg" "$ICONS_DIR/scalable/apps/claude-chatview.svg"
+      # the window's app id is its binary name; this entry gives it the icon
+      cat > "$APPS_DIR/claude-chatview-shell.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Claude Code
+Comment=claude-chatview window (started by \`claude\`)
+Exec=claude-chatview-shell %u
+Icon=claude-chatview
+NoDisplay=true
+StartupWMClass=claude-chatview-shell
+DESKTOP
+      command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" 2>/dev/null || true
+      command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
+      say "window built; linked claude-chatview-shell into $BIN_DIR, icon and app entry installed"
+    else
+      say "the build failed — the page opens in Chromium until it builds. WebKitGTK headers:"
+      say "  sudo pacman -S --needed webkit2gtk-4.1   (Debian/Ubuntu: libwebkit2gtk-4.1-dev)"
+    fi
+  else
+    say "skipped — the page opens in Chromium."
+  fi
+fi
 
 # ── optional: the statusLine relay (context bar) ───────────────────────
 SETTINGS="$CLAUDE_DIR/settings.json"

@@ -287,3 +287,78 @@ body {
 .tx-item.tx-new { animation: tx-in .28s ease-out both; }
 .tx-reveal > * { animation: tx-in .32s ease-out both; animation-delay: calc(var(--i, 0) * 70ms); }
 @media (prefers-reduced-motion: reduce) { .tx-item.tx-new, .tx-reveal > * { animation: none; } }
+
+/* ── blue liquid glass ─────────────────────────────────────────────────
+   A deep blue backdrop with soft light pools; the chrome (header, footer,
+   menus, task rows, code blocks) is frosted glass over it. Static on
+   purpose: no animated blobs, so the GPU idles while nothing changes. The
+   terminal view stays opaque (see THEME in app.mjs), tinted to match. */
+:root {
+  --glass: rgba(120, 170, 255, .08);
+  --glass-strong: rgba(70, 110, 200, .22);
+  --glass-edge: rgba(170, 205, 255, .22);
+  --glass-shine: rgba(255, 255, 255, .14);
+  --glass-blur: blur(18px) saturate(160%);
+}
+body {
+  background:
+    radial-gradient(80vmax 50vmax at 50% 115%, rgba(70, 110, 230, .22), transparent 65%),
+    linear-gradient(180deg, #081230 0%, #060d26 55%, #040919 100%);
+  background-attachment: fixed;
+}
+/* the top bar: black and slim; the button is square and runs edge to edge */
+.head { padding: 0 0 0 10px; height: 24px; align-items: stretch; background: rgba(0, 0, 0, .85);
+        border-bottom: 1px solid rgba(255, 255, 255, .08); position: relative; z-index: 2; }
+.head .brand, .head .project { align-self: center; }
+.head .btn { height: auto; border: 0; border-left: 1px solid rgba(255, 255, 255, .08); border-radius: 0;
+             background: transparent; box-shadow: none; padding: 0 12px; }
+.head .btn:hover { color: #cdd6f4; background: rgba(255, 255, 255, .06); box-shadow: none; }
+.head .btn.view.fallback { color: #fab387; box-shadow: inset 0 -2px 0 #fab387; }
+.ended { background: rgba(0, 0, 0, .7); }
+/* the status line only speaks up for an error */
+.foot:not(.err) { display: none; }
+.btn { background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.03));
+       border: 1px solid var(--glass-edge); border-radius: 0;
+       box-shadow: inset 0 1px 0 var(--glass-shine), 0 2px 8px rgba(0, 10, 40, .35); }
+.btn:hover { border-color: #89b4fa; box-shadow: inset 0 1px 0 var(--glass-shine), 0 0 12px rgba(137, 180, 250, .35); }
+/* the terminal view: an opaque pane, rounded into the glass */
+body:not([data-view="chat"]) .screen { background: #0b1630; }
+.cchat-menu, .cchat-tview-head {
+  background: var(--glass-strong);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-shine), 0 10px 30px rgba(0, 8, 30, .5);
+}
+.cchat-tview-head { border-bottom: 1px solid var(--glass-edge); }
+.cchat-menu-item.sel { background: rgba(137, 180, 250, .22); }
+.cchat-menu-item:hover { background: rgba(137, 180, 250, .12); }
+.cchat-task { background: var(--glass); border-color: var(--glass-edge); }
+.cchat-task:hover:not(:disabled), .cchat-task.open { background: rgba(137, 180, 250, .14); }
+.tx-xfull, .tx-text .tx-md pre {
+  background: rgba(10, 25, 60, .45); border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07), inset 0 0 0 1px rgba(170, 205, 255, .12);
+}
+.tx-xfull { border-left: 2px solid rgba(137, 180, 250, .5); }
+.tx-img { background: rgba(5, 11, 31, .6); border-color: var(--glass-edge); border-radius: 10px; }
+.cchat-ctx-bar { background: rgba(170, 205, 255, .15); }
+.tx-lightbox { background: rgba(4, 10, 28, .7);
+               -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+
+/* the transparent window (shell.js): the desktop shows through a blue tint;
+   blur behind it is the compositor's job (KWin), not the page's */
+html[data-shell="glass"] { background: transparent; }
+html[data-shell="glass"] body { background: rgba(6, 13, 38, .45); }
+html[data-shell="glass"] .head { background: rgba(0, 0, 0, .45); }
+
+/* a Bash call with no description shows its command instead: one line,
+   cut with an ellipsis, so a row reads like a description either way */
+.tx-brow .tx-xhead { min-width: 0; }
+.tx-brow .tx-bdesc { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                     overflow-wrap: normal; word-break: normal; }
+.tx-bashbody:not(.multi) .tx-bdesc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* the Claude spark in the top bar */
+.brand-logo { width: 14px; height: 14px; display: block; }
+/* KWin blurs behind the whole window already: no second, in-page blur */
+html[data-shell="glass"] *, html[data-shell="glass"] *::before, html[data-shell="glass"] *::after {
+  -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
