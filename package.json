@@ -1,0 +1,23 @@
+{
+  "name": "claude-chatview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A chat-style window over the real Claude Code: the conversation drawn as a chat, Claude Code's own terminal one key away.",
+  "type": "module",
+  "bin": {
+    "claude-chatview": "bin/claude-chatview",
+    "claude-chatview-statusline": "bin/claude-chatview-statusline"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "for f in bin/claude-chatview bin/claude-chatview-statusline lib/*.mjs public/*.mjs; do node --check \"$f\" || exit 1; done && bash -n install.sh && bash -n uninstall.sh && echo ok"
+  },
+  "dependencies": {
+    "node-pty": "1.1.0"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
+  }
+}

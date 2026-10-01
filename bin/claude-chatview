@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// Bootstrap: CommonJS on purpose (bin/package.json), so an extensionless
+// file loads the same on every node >= 18; the program is lib/cli.mjs.
+'use strict';
+const path = require('path');
+const { pathToFileURL } = require('url');
+import(pathToFileURL(path.join(__dirname, '..', 'lib', 'cli.mjs')).href).catch((err) => {
+  process.stderr.write(`claude-chatview: ${err && err.stack || err}\n`);
+  process.exit(1);
+});

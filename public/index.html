@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="vendor/xterm/xterm.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body data-view="chat">
+<header class="head">
+  <span class="brand tx-star">✻</span>
+  <span id="project" class="project"></span>
+  <button id="viewBtn" class="btn view" type="button">chat</button>
+</header>
+<main id="screen" class="screen">
+  <div id="term" class="term"></div>
+</main>
+<div id="ended" class="ended" hidden>
+  <span id="endedText"></span>
+  <button id="keepOpen" class="btn" type="button" hidden>keep open</button>
+</div>
+<footer id="foot" class="foot"></footer>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

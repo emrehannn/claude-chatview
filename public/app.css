@@ -1,0 +1,251 @@
+/*
+ * claude-chatview — Catppuccin Mocha, JetBrains Mono Nerd Font (bundled).
+ *
+ * The page is one Claude Code session: a header, the screen (the real
+ * terminal, with the chat view laid over it), and a status line.
+ */
+
+/* The bundled font, under its own family name so no installed font can
+   shadow it. `block`: never draw a fallback glyph the WebGL atlas would
+   then cache. */
+@font-face {
+  font-family: "JetBrainsMono NFM Pane";
+  src: url("vendor/fonts/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono NFM Pane";
+  src: url("vendor/fonts/JetBrainsMonoNerdFontMono-Bold.woff2") format("woff2");
+  font-weight: 700; font-style: normal; font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono NFM Pane";
+  src: url("vendor/fonts/JetBrainsMonoNerdFontMono-Italic.woff2") format("woff2");
+  font-weight: 400; font-style: italic; font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono NFM Pane";
+  src: url("vendor/fonts/JetBrainsMonoNerdFontMono-BoldItalic.woff2") format("woff2");
+  font-weight: 700; font-style: italic; font-display: block;
+}
+
+:root {
+  --base: #1e1e2e;
+  --mantle: #181825;
+  --crust: #11111b;
+  --surface0: #313244;
+  --surface1: #45475a;
+  --overlay0: #6c7086;
+  --text: #cdd6f4;
+  --subtext: #a6adc8;
+  --blue: #89b4fa;
+  --peach: #fab387;
+  --red: #f38ba8;
+  --mono: "JetBrainsMono NFM Pane", "JetBrains Mono", ui-monospace, "DejaVu Sans Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--base); color: var(--text);
+  font: 12px var(--mono);
+}
+
+.head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; background: var(--mantle);
+  border-bottom: 1px solid var(--surface0);
+}
+.brand { flex: 0 0 auto; color: var(--text); }
+.project { flex: 1 1 auto; min-width: 0; color: var(--overlay0);
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn { box-sizing: border-box; height: 22px; padding: 0 8px; flex: 0 0 auto;
+       display: inline-flex; align-items: center; justify-content: center;
+       font: 11px/1 var(--mono); color: var(--subtext); cursor: pointer;
+       background: rgba(255, 255, 255, .05); border: 1px solid var(--surface1);
+       border-radius: 3px; }
+.btn:hover { color: var(--text); border-color: var(--blue); }
+.view { min-width: 74px; }
+.view.fallback { color: var(--peach); border-color: var(--peach); }
+
+/* `min-height: 0` is load-bearing in a flex column: without it the xterm
+   viewport reports its full content height and the fit never settles. */
+.screen { flex: 1 1 auto; min-height: 0; overflow: hidden; position: relative;
+          padding: 6px 4px 6px 10px; }
+.term { height: 100%; }
+.screen .xterm { height: 100%; }
+.screen .xterm-viewport { overflow-y: auto; background: transparent !important; }
+
+.ended { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+         padding: 6px 10px; color: var(--peach); background: var(--crust);
+         border-top: 1px solid var(--peach); }
+.ended[hidden] { display: none; }
+
+.foot { flex: 0 0 auto; margin: 0; padding: 4px 10px; font: 11px var(--mono);
+        color: var(--overlay0); border-top: 1px solid var(--surface0);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot.err { color: var(--red); }
+.foot.warn { color: var(--peach); }
+
+/* ── the chat view ─────────────────────────────────────────────────────
+   A rendering layer over the terminal (`chatview.mjs`). It lies OVER the
+   terminal's box, which stays laid out (visibility: hidden) so the pty
+   keeps the window's size. */
+.cchat { position: absolute; inset: 0; display: flex; flex-direction: column;
+         min-height: 0; font: var(--cfont, 14px)/1.55 "JetBrainsMono NFM Pane",
+         "JetBrains Mono", ui-monospace, Menlo, monospace; color: #cdd6f4; }
+.cchat[hidden] { display: none; }
+.cchat-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+                padding: 8px 10px 0 10px; display: flex; flex-direction: column; }
+.tx-head { color: #cdd6f4; padding: 2px 0 14px; }
+.tx-star { color: #fab387; }
+.tx-dim { color: #7f849c; }
+.tx-empty { color: #7f849c; padding: 4px 0 12px; }
+.cchat-list { display: flex; flex-direction: column; }
+/* the newest turn is at least a pane tall, so its prompt can sit at the TOP
+   while the reply flows down under it — the video's shape */
+.tx-turn { display: flex; flex-direction: column; gap: 14px; padding-bottom: 22px; }
+.tx-item { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+.tx-body { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.tx-dot { flex: 0 0 auto; width: 1ch; color: #cdd6f4; font-size: .8em; line-height: 1.95; }
+.tx-tool .tx-dot { color: #a6e3a1; }
+.tx-tool .tx-dot.pending { color: #7f849c; animation: tx-blink 1.2s ease-in-out infinite; }
+.tx-tool .tx-dot.err { color: #f38ba8; }
+@keyframes tx-blink { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .tx-tool .tx-dot.pending { animation: none; } }
+.tx-tname { color: #cdd6f4; font-weight: 700; }
+.tx-peer .tx-dot { color: #cba6f7; }
+/* images from the transcript: thumbnails, a click shows one full size */
+.tx-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.tx-uimgs { padding-left: calc(1ch + 10px); }
+.tx-img { display: block; max-width: min(100%, 360px); max-height: 240px; object-fit: contain;
+          border-radius: 6px; border: 1px solid #45475a; background: #11111b; cursor: zoom-in; }
+.tx-lightbox { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center;
+               justify-content: center; background: rgba(0, 0, 0, .82); cursor: zoom-out; }
+.tx-lightbox img { max-width: 94vw; max-height: 94vh; object-fit: contain; border-radius: 6px; }
+/* back-to-back Bash calls: one block, one line per call */
+.tx-bcount { color: #6c7086; font-size: .9em; }
+.tx-brows { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.tx-brow .tx-xhead { display: flex; align-items: baseline; }
+.tx-bdesc { color: #a6adc8; min-width: 0; overflow-wrap: anywhere; }
+.tx-brow.pending .tx-bdesc { color: #7f849c; }
+.tx-brow.err .tx-bdesc { color: #f38ba8; }
+.tx-xhead { cursor: pointer; overflow-wrap: anywhere; }
+.tx-xprev { color: #a6adc8; }
+.tx-xmore { color: #6c7086; font-size: .85em; white-space: nowrap; }
+.tx-xhead:hover .tx-xmore { color: #fab387; }
+.tx-xfull { margin-top: 6px; padding: 8px 10px; border-left: 2px solid #45475a;
+            background: rgba(255, 255, 255, .03); color: #bac2de; }
+.tx-targs { color: #a6adc8; }
+.tx-result { display: flex; gap: 8px; color: #9399b2; margin-top: 2px; padding-left: 2px; }
+.tx-result.err { color: #f38ba8; }
+.tx-elbow { flex: 0 0 auto; }
+.tx-rtext { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.tx-user { color: #89b4fa; }
+/* the time a prompt was sent, at the line's right end */
+.tx-time { margin-left: auto; padding-left: 12px; flex: 0 0 auto; color: #6c7086; font-size: .85em; line-height: 1.8; }
+/* Claude's side of a turn, between two orange lines */
+.tx-resp { display: flex; flex-direction: column; gap: 14px; padding: 12px 0;
+           border-top: 1px solid rgba(250, 179, 135, .75); border-bottom: 1px solid rgba(250, 179, 135, .75); }
+.tx-user .tx-caret, .cchat-input .tx-caret { color: #9399b2; flex: 0 0 auto; }
+.tx-utext { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.tx-cmd .tx-utext { color: #cba6f7; }
+.tx-queued { opacity: .6; }
+.tx-note { color: #7f849c; text-align: center; font-size: .9em; }
+/* assistant text is markdown (`markdown.mjs`, every byte escaped) */
+.tx-text .tx-md > :first-child { margin-top: 0; }
+.tx-text .tx-md > :last-child { margin-bottom: 0; }
+.tx-text .tx-md p, .tx-text .tx-md ul, .tx-text .tx-md ol, .tx-text .tx-md pre { margin: 0 0 .6em; }
+.tx-text .tx-md ul, .tx-text .tx-md ol { padding-left: 1.4em; }
+.tx-text .tx-md h1, .tx-text .tx-md h2, .tx-text .tx-md h3, .tx-text .tx-md h4 {
+  font-size: 1em; margin: .4em 0; color: #f5e0dc; }
+.tx-text .tx-md code { color: #cba6f7; background: rgba(255, 255, 255, .05);
+                    padding: 0 .25em; border-radius: 3px; font: inherit; }
+.tx-text .tx-md pre { background: rgba(0, 0, 0, .25); padding: 6px 8px;
+                   border-radius: 4px; overflow-x: auto; border: 0; }
+.tx-text .tx-md blockquote { margin: 0 0 .6em; padding-left: 10px;
+                             border-left: 2px solid #45475a; color: #a6adc8; }
+.tx-text .tx-md pre code { background: none; padding: 0; color: #cdd6f4; }
+.tx-text .tx-md a { color: #89b4fa; }
+.tx-text .tx-md table { border-collapse: collapse; font-size: .92em; }
+.tx-text .tx-md th, .tx-text .tx-md td { border: 1px solid #45475a; padding: 2px 6px; }
+.tx-text .tx-md .md-table { overflow-x: auto; margin: 0 0 .6em; }
+.tx-text .tx-md strong { color: #f5e0dc; }
+/* nothing in the transcript column may be squeezed: a flex child shrunk to
+   0 px spills its text over the prompt line below it */
+.cchat-scroll > * { flex-shrink: 0; }
+.cchat-status { color: #fab387; padding: 0; }
+.cchat-status.on { padding: 0 0 6px; }
+/* the prompt line: no box, the transcript's own `>` — right under the last
+   reply, in the flow, never pinned to the pane's bottom */
+.cchat-input { display: flex; gap: 10px; align-items: flex-start; padding: 4px 0 10px; }
+.cchat-tail { flex: 0 0 auto; }
+.cchat-ta { flex: 1 1 auto; min-width: 0; resize: none; border: 0; outline: 0;
+            background: transparent; color: #89b4fa; font: inherit; padding: 0;
+            margin: 0; line-height: inherit; max-height: 200px; }
+.cchat-ta::placeholder { color: #585b70; }
+/* the context window, from the statusLine relay: a small bar, used part
+   filled, green -> yellow -> peach -> red as it fills */
+.cchat-ctx { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+             color: #6c7086; font-size: .78em; line-height: 1.95; padding-left: 8px;
+             cursor: default; user-select: none; }
+.cchat-ctx[hidden] { display: none; }
+.cchat-ctx-bar { width: 64px; height: 5px; border-radius: 3px; background: #313244;
+                 overflow: hidden; display: inline-block; }
+.cchat-ctx-fill { display: block; height: 100%; width: 0; border-radius: 3px;
+                  background: #a6e3a1; transition: width .4s ease, background-color .4s ease; }
+.cchat-ctx[data-level="warn"] .cchat-ctx-fill { background: #f9e2af; }
+.cchat-ctx[data-level="high"] .cchat-ctx-fill { background: #fab387; }
+.cchat-ctx[data-level="full"] .cchat-ctx-fill { background: #f38ba8; }
+.cchat-ctx[data-level="full"] .cchat-ctx-pct { color: #f38ba8; }
+@media (prefers-reduced-motion: reduce) { .cchat-ctx-fill { transition: none; } }
+/* the `/` dropdown — compact, the pane's own font, over the transcript */
+.cchat-menu { position: absolute; z-index: 5; max-height: 14.5em; overflow-y: auto;
+              background: #181825; border: 1px solid #45475a; border-radius: 6px;
+              padding: 3px 0; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); font-size: .9em; }
+.cchat-menu[hidden] { display: none; }
+.cchat-menu-item { display: flex; gap: 14px; padding: 1px 10px; white-space: nowrap;
+                   cursor: pointer; line-height: 1.6; }
+.cchat-menu-name { flex: 0 0 auto; min-width: 16ch; color: #cdd6f4; }
+.cchat-menu-desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                   color: #7f849c; }
+.cchat-menu-item:hover { background: rgba(49, 50, 68, .6); }
+.cchat-menu-item.sel { background: #313244; }
+.cchat-menu-item.sel .cchat-menu-name { color: #cba6f7; }
+.cchat-menu-item.sel .cchat-menu-desc { color: #a6adc8; }
+.cview { min-width: 64px; }
+.cview.fallback { color: #fab387; border-color: #fab387; }
+/* background tasks: a chip per agent / shell above the prompt line (running
+   = pulsing peach, done = green, failed / killed = red), and the task view */
+.cchat-tasks { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+.cchat-tasks[hidden], .cchat-tview[hidden], .cchat-tview-out[hidden] { display: none; }
+.cchat-task { display: inline-flex; align-items: center; gap: 6px; max-width: 34ch;
+              padding: 1px 8px; border: 1px solid #45475a; border-radius: 10px;
+              background: rgba(49, 50, 68, .45); color: #bac2de; font: inherit;
+              font-size: .85em; line-height: 1.6; cursor: pointer; }
+.cchat-task:hover:not(:disabled) { border-color: #6c7086; background: #313244; }
+.cchat-task:disabled { cursor: default; opacity: .7; }
+.cchat-task.open { border-color: #fab387; color: #cdd6f4; }
+.cchat-task-dot { flex: 0 0 auto; font-size: .8em; color: #7f849c; }
+.cchat-task[data-tone="running"] .cchat-task-dot { color: #fab387; animation: tx-blink 1.2s ease-in-out infinite; }
+.cchat-task[data-tone="done"] .cchat-task-dot { color: #a6e3a1; }
+.cchat-task[data-tone="failed"] .cchat-task-dot { color: #f38ba8; }
+.cchat-task-kind { flex: 0 0 auto; color: #7f849c; }
+.cchat-task-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cchat-task-time { flex: 0 0 auto; color: #7f849c; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .cchat-task[data-tone="running"] .cchat-task-dot { animation: none; } }
+.cchat-tview { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; }
+.cchat-tview-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+                    padding: 10px 10px 8px; margin: -8px -10px 0; border-bottom: 1px solid #313244;
+                    position: sticky; top: -8px; z-index: 1; background: #11111b; }
+.cchat-tview-back { border: 0; background: none; padding: 0; color: #89b4fa; font: inherit; cursor: pointer; }
+.cchat-tview-back:hover { color: #fab387; }
+.cchat-tview-title { color: #cdd6f4; min-width: 0; overflow-wrap: anywhere; }
+.cchat-tview-state { color: #7f849c; }
+.cchat-tview-state[data-tone="running"] { color: #fab387; }
+.cchat-tview-state[data-tone="done"] { color: #a6e3a1; }
+.cchat-tview-state[data-tone="failed"] { color: #f38ba8; }
+.cchat-tview-out { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #bac2de;
+                   font: inherit; font-size: .92em; }
+.tx-brief .tx-xprev { color: #89b4fa; }

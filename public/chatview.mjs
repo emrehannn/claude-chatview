@@ -1,0 +1,997 @@
+/**
+ * The chat view — a rendering layer over the real Claude Code, never a
+ * replacement for it. Everything Claude Code can do still works: commands,
+ * Esc to interrupt, modes; where this view has no drawing for a screen (a
+ * dialog, a picker, a permission prompt), the real terminal is shown.
+ *
+ * So the `claude` in the pty is untouched and keeps its xterm (hidden under
+ * this view, still laid out so its size stays right). This view:
+ *
+ *   * DRAWS the transcript Claude Code writes (`lib/transcript.mjs` sends it
+ *     as display items over the pane's socket): `> prompt`, `● reply`,
+ *     `● tool args` with a dim `⎿ result` line;
+ *   * TYPES into the pty: the input line sends its text as keystrokes, then
+ *     Enter — so `/model`, `/config`, `!cmd`, Esc (interrupt), Ctrl+C and
+ *     Shift+Tab (mode) are Claude Code's own, not re-implemented here;
+ *   * STEPS ASIDE: whenever the TUI's screen is not its ordinary prompt — a
+ *     permission prompt, a picker, a dialog, `/config` — the pane shows the
+ *     real terminal until the prompt is back (`screenState`). When in doubt
+ *     the terminal is shown: nobody may be left unable to answer a prompt.
+ */
+import { renderMarkdown } from './markdown.mjs';
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+/** a rule line: nothing but `─` (a narrow pane wraps it, leaving a stub) */
+const RULE = /^─{2,}\s*$/;
+/** Claude Code's spinner line while it works: `✻ Cooking… (2s · ↓ 211 tokens …)` */
+const SPINNER = /^\S\s+\S.*…\s*\((?:\d+[hms]|esc|.*\btokens?\b)/;
+
+/**
+ * What the TUI's screen is showing, read from the emulator's buffer.
+ *
+ *   normal  — the ordinary prompt: a `❯` line at column 0 between two rule
+ *             lines, near the bottom. True while Claude is working too (the
+ *             input box stays up), false for every dialog and picker, which
+ *             replace the input box (permission prompt, /config, /model,
+ *             /resume, the trust dialog, AskUserQuestion…).
+ *   menu    — the prompt is up AND a slash-command list sits above it (the
+ *             input starts with `/`): transient while a command is typed.
+ *   blank   — nothing drawn yet (the TUI is starting).
+ *   running — the spinner line is on screen.
+ */
+export function screenState(term) {
+  const buf = term?.buffer?.active;
+  if (!buf) return { normal: false, blank: true, running: false, menu: false };
+  const rows = term.rows;
+  const lines = [];
+  for (let i = 0; i < rows; i += 1) {
+    lines.push(buf.getLine(buf.baseY + i)?.translateToString(true) ?? '');
+  }
+  const blank = lines.every((l) => !l.trim());
+  let normal = false;
+  let menu = false;
+  // the LAST prompt line that has a rule above it and a rule below it
+  for (let i = lines.length - 1; i > 0; i -= 1) {
+    if (!lines[i].startsWith('❯')) continue;
+    if (!RULE.test(lines[i - 1])) continue;
+    let below = -1;
+    for (let j = i + 1; j < Math.min(lines.length, i + 40); j += 1) {
+      if (RULE.test(lines[j])) { below = j; break; }
+    }
+    if (below < 0) continue;
+    normal = true;
+    menu = /^❯\s*\//.test(lines[i]) && /^\s+\/\S/.test(lines[i - 2] || '');
+    break;
+  }
+  const running = lines.some((l) => SPINNER.test(l));
+  return { normal, blank, running, menu };
+}
+
+// ── the `/` dropdown's list, shared by every chat ─────────────────────
+// `GET api/commands` (server-side `lib/commands.mjs`: Claude Code's
+// built-ins, project + user skills and commands, enabled plugins'), kept
+// here for 30 s. Fetched on the first `/`, never on page load.
+const COMMANDS_TTL_MS = 30_000;
+let commandsCache = null;
+let commandsAt = 0;
+let commandsLoading = null;
+
+function commandList() {
+  if (commandsCache && Date.now() - commandsAt > COMMANDS_TTL_MS) loadCommands();
+  return commandsCache;
+}
+
+function loadCommands() {
+  if (!commandsLoading) {
+    commandsLoading = fetch('api/commands')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => {
+        if (Array.isArray(body?.commands)) {
+          commandsCache = body.commands.filter((c) => c && typeof c.name === 'string');
+          commandsAt = Date.now();
+        }
+      })
+      .catch(() => {})
+      .finally(() => { commandsLoading = null; });
+  }
+  return commandsLoading;
+}
+
+/** Shift+Enter, Esc, Ctrl+C, Shift+Tab → the bytes the TUI expects, or null. */
+function keyBytes(ev, mac) {
+  if (ev.key === 'Escape') return '\x1b';
+  if (ev.key === 'Tab' && ev.shiftKey) return '\x1b[Z';
+  if (ev.ctrlKey && !ev.metaKey && !ev.altKey && (ev.key === 'c' || ev.key === 'C')) {
+    // Ctrl+C copies on Windows/Linux when something is selected
+    if (!mac && String(globalThis.getSelection?.() || '')) return null;
+    return '\x03';
+  }
+  return null;
+}
+
+/** `at` (ISO) -> the person's local HH:MM, or '' when there is none. */
+function clock(at) {
+  const d = at ? new Date(at) : null;
+  if (!d || Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function resultLine(parent, text, error) {
+  const r = el('div', `tx-result${error ? ' err' : ''}`);
+  r.append(el('span', 'tx-elbow', '⎿'), el('span', 'tx-rtext', text));
+  parent.append(r);
+}
+
+/** Thumbnails for images (data: URLs from the transcript); a click shows one
+ *  full size over the page, a second click or Esc closes it. */
+function imageStrip(parent, images, onLayout = () => {}) {
+  if (!images?.length) return;
+  const strip = el('div', 'tx-imgs');
+  for (const im of images) {
+    if (!im.url) { strip.append(el('span', 'tx-dim', `[${im.note || 'image'}]`)); continue; }
+    const img = el('img', 'tx-img');
+    img.src = im.url;
+    img.alt = 'image';
+    img.loading = 'lazy';
+    img.addEventListener('load', () => onLayout(), { once: true });
+    img.addEventListener('click', () => {
+      const box = el('div', 'tx-lightbox');
+      const big = el('img', '');
+      big.src = im.url;
+      box.append(big);
+      const close = () => { box.remove(); document.removeEventListener('keydown', onKey, true); };
+      const onKey = (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); ev.preventDefault(); close(); } };
+      box.addEventListener('click', close);
+      document.addEventListener('keydown', onKey, true);
+      document.body.append(box);
+    });
+    strip.append(img);
+  }
+  parent.append(strip);
+}
+
+/** A preview line that opens to the full text (markdown) on click. */
+function expandable(body, label, text, onLayout = () => {}) {
+  const head = el('div', 'tx-xhead');
+  if (label) head.append(el('b', 'tx-tname', label), document.createTextNode(' '));
+  const first = String(text).split('\n').find((l) => l.trim()) || '';
+  const preview = el('span', 'tx-xprev', first.length > 160 ? `${first.slice(0, 160)}…` : first);
+  const more = el('span', 'tx-xmore', '  ▸ expand');
+  head.append(preview, more);
+  const full = el('div', 'tx-xfull tx-md');
+  full.hidden = true;
+  head.addEventListener('click', () => {
+    if (!full.dataset.drawn) { full.innerHTML = renderMarkdown(text); full.dataset.drawn = '1'; }
+    full.hidden = !full.hidden;
+    preview.hidden = !full.hidden;
+    more.textContent = full.hidden ? '  ▸ expand' : '  ▾ collapse';
+    onLayout();
+  });
+  body.append(head, full);
+}
+
+/**
+ * Draws display items into one list — the chat's, or a background agent's
+ * own transcript in the task view (one look for both).
+ *
+ * @param {HTMLElement} list
+ * @param {object} [o]
+ * @param {() => void} [o.onTurn]    a new turn was started
+ * @param {() => void} [o.onLayout]  something changed height (an expand)
+ * @param {(it: object) => void} [o.onTask]  a background-task item
+ * @param {boolean} [o.briefs]  a long prompt folds to one line (an agent's brief)
+ */
+function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask = null,
+                               briefs = false } = {}) {
+  /** tool_use id -> its element, so a result lands under its call */
+  const tools = new Map();
+  let turn = null;
+  // back-to-back Bash calls share one `● Bash` block: one line per call (what
+  // it is for), the command and its output only on click
+  let bash = null;
+
+  function newTurn() {
+    bash = null;
+    if (turn) turn.classList.remove('last');
+    turn = el('section', 'tx-turn last');
+    list.append(turn);
+    onTurn();
+    return turn;
+  }
+
+  /** Claude's side of a turn, between two orange lines. */
+  function respBox() {
+    const t = turn || newTurn();
+    if (!t.resp) { t.resp = el('div', 'tx-resp'); t.append(t.resp); }
+    return t.resp;
+  }
+
+  function dotLine(cls, dotCls) {
+    const row = el('div', `tx-item ${cls}`);
+    row.append(el('span', `tx-dot ${dotCls || ''}`.trim(), '●'));
+    const body = el('div', 'tx-body');
+    row.append(body);
+    respBox().append(row);
+    return body;
+  }
+
+  function bashPaint(g) {
+    g.dot.classList.toggle('pending', g.pending > 0);
+    g.dot.classList.toggle('err', g.err > 0);
+    g.count.textContent = g.n > 1 ? `  · ${g.n} commands` : '';
+  }
+
+  function bashRow(it) {
+    if (!bash) {
+      const body = dotLine('tx-tool tx-bash', 'pending');
+      const count = el('span', 'tx-bcount', '');
+      const head = el('div', 'tx-bhead');
+      head.append(el('b', 'tx-tname', 'Bash'), count);
+      const rows = el('div', 'tx-brows');
+      body.append(head, rows);
+      bash = { rows, count, dot: body.parentElement.querySelector('.tx-dot'), n: 0, pending: 0, err: 0 };
+    }
+    const g = bash;
+    const row = el('div', 'tx-brow pending');
+    const line = el('div', 'tx-xhead');
+    const more = el('span', 'tx-xmore', '  ▸');
+    line.append(el('span', 'tx-bdesc', it.args || '(command)'), more);
+    const full = el('div', 'tx-xfull tx-md');
+    full.hidden = true;
+    row.append(line, full);
+    row.group = g;
+    line.addEventListener('click', () => {
+      if (!full.dataset.drawn) {
+        full.innerHTML = renderMarkdown(it.detail || '');
+        if (row.result) {
+          resultLine(full, row.result.text, row.result.error);
+          imageStrip(full, row.result.images, onLayout);
+        }
+        full.dataset.drawn = '1';
+      }
+      full.hidden = !full.hidden;
+      more.textContent = full.hidden ? '  ▸' : '  ▾';
+      onLayout();
+    });
+    g.rows.append(row);
+    g.n += 1; g.pending += 1;
+    bashPaint(g);
+    return row;
+  }
+
+  function bashResult(row, it) {
+    if (row.result) return;
+    row.result = { text: it.text, error: it.error, images: it.images };
+    row.classList.remove('pending');
+    if (it.error) row.classList.add('err');
+    const g = row.group;
+    g.pending = Math.max(0, g.pending - 1);
+    if (it.error) g.err += 1;
+    bashPaint(g);
+    const full = row.querySelector('.tx-xfull');
+    if (full?.dataset.drawn) resultLine(full, it.text, it.error);
+  }
+
+  /** One item; returns the turn it started, if it started one. */
+  function add(it) {
+    // anything Claude says or does between two Bash calls closes the block
+    if (!['result', 'turn', 'task'].includes(it.k) && !(it.k === 'tool' && it.name === 'Bash')) {
+      bash = null;
+    }
+    switch (it.k) {
+      case 'user':
+      case 'cmd': {
+        // a queued prompt that has now been taken
+        for (const q of list.querySelectorAll('.tx-queued')) {
+          if (q.dataset.text === it.text) q.remove();
+        }
+        const t = newTurn();
+        if (briefs && it.k === 'user' && it.text.length > 240) {
+          // an agent's brief: one line, the rest on click
+          const row = el('div', 'tx-item tx-user tx-brief');
+          row.append(el('span', 'tx-caret', '>'));
+          const body = el('div', 'tx-body');
+          row.append(body);
+          expandable(body, 'brief', it.text, onLayout);
+          t.append(row);
+          return t;
+        }
+        const row = el('div', `tx-item tx-user${it.k === 'cmd' ? ' tx-cmd' : ''}`);
+        const utext = el('span', 'tx-utext', it.text);
+        row.append(el('span', 'tx-caret', '>'), utext);
+        const time = clock(it.at);
+        if (time) row.append(el('span', 'tx-time', time));
+        t.append(row);
+        if (it.images?.length) {
+          // under the prompt, indented like its text
+          const wrap = el('div', 'tx-uimgs');
+          imageStrip(wrap, it.images, onLayout);
+          t.append(wrap);
+        }
+        return t;
+      }
+      case 'unqueue':
+        for (const q of list.querySelectorAll('.tx-queued')) {
+          if (q.dataset.text === it.text) q.remove();
+        }
+        break;
+      case 'queued': {
+        const row = el('div', 'tx-item tx-user tx-queued');
+        row.dataset.text = it.text;
+        row.append(el('span', 'tx-caret', '>'), el('span', 'tx-utext', it.text),
+                   el('span', 'tx-dim', '  queued'));
+        list.append(row);
+        break;
+      }
+      case 'text': {
+        const body = dotLine('tx-text');
+        body.classList.add('tx-md');
+        body.innerHTML = renderMarkdown(it.text);
+        break;
+      }
+      case 'tool': {
+        if (it.name === 'Bash') {
+          const row = bashRow(it);
+          if (it.id) tools.set(it.id, row);
+          break;
+        }
+        const body = dotLine('tx-tool', 'pending');
+        if (it.detail) {
+          // an Agent brief / a SendMessage: the line opens to the full text
+          expandable(body, it.name, it.args ? `${it.args}\n\n${it.detail}` : it.detail, onLayout);
+          body.querySelector('.tx-xprev').textContent = ` ${it.args || ''}`;
+        } else {
+          body.append(el('b', 'tx-tname', it.name));
+          if (it.args) body.append(el('span', 'tx-targs', ` ${it.args}`));
+        }
+        body.dataset.args = it.args || '';
+        if (it.id) tools.set(it.id, body);
+        break;
+      }
+      case 'peer': {
+        // a message an agent sent back: one line, the rest on click
+        const body = dotLine('tx-peer');
+        expandable(body, 'agent', it.text, onLayout);
+        break;
+      }
+      case 'result': {
+        const body = tools.get(it.id);
+        if (body?.group) { bashResult(body, it); break; }
+        if (body) {
+          const dot = body.parentElement?.querySelector('.tx-dot');
+          dot?.classList.remove('pending');
+          if (it.error) dot?.classList.add('err');
+          resultLine(body, it.text, it.error);
+          imageStrip(body, it.images, onLayout);
+        } else {
+          resultLine(respBox(), it.text, it.error);
+          imageStrip(respBox(), it.images, onLayout);
+        }
+        break;
+      }
+      case 'out':
+        resultLine(respBox(), it.text, false);
+        break;
+      case 'interrupt':
+        resultLine(respBox(), 'Interrupted · What should Claude do instead?', true);
+        break;
+      case 'note':
+        respBox().append(el('div', 'tx-note', `— ${it.text} —`));
+        break;
+      case 'turn':
+        // a finished turn: tools that never got a result were cut off
+        for (const d of (turn || list).querySelectorAll('.tx-dot.pending')) {
+          d.classList.remove('pending');
+        }
+        break;
+      case 'task':
+        onTask?.(it);
+        break;
+      default:
+        break;
+    }
+    return null;
+  }
+
+  return {
+    add,
+    reset() { list.replaceChildren(); tools.clear(); turn = null; },
+    get turn() { return turn; },
+    /** a tool call's args line — a task chip's label when it has none */
+    toolArgs: (id) => tools.get(id)?.dataset.args || '',
+  };
+}
+
+// ── background tasks ──────────────────────────────────────────────────
+/** A finished task stays on the strip this long. */
+const TASK_LINGER_MS = 5 * 60_000;
+/** A task "running" this long is from a Claude that is gone: not shown. */
+const TASK_STALE_MS = 24 * 3600_000;
+/** Most output text the task view holds for a shell. */
+const TASK_TEXT_MAX = 400_000;
+
+/** 3s · 4m 05s · 1h 12m */
+function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** completed -> done; failed / killed / stopped -> failed */
+const taskTone = (status) => (status === 'running' ? 'running'
+  : status === 'completed' ? 'done' : 'failed');
+
+/**
+ * One chat's view.
+ *
+ * @param {object} o
+ * @param {(data: string) => void} o.send   keystrokes into this chat's pty
+ * @param {() => boolean} o.bracketed       does the TUI accept bracketed paste
+ * @param {boolean} o.mac
+ * @param {(ev: KeyboardEvent) => boolean} [o.keyFilter]  the pane's own keys
+ *        (zoom); true = handled, do nothing more
+ * @param {(task: {kind: string, id: string, out?: string}) => void} [o.onOpenTask]
+ *        a task chip was opened: tail that task (`{t:'task'}` on the socket)
+ * @param {() => void} [o.onCloseTask]  the task view was closed
+ */
+/** A prompt longer than this is sent as a paste, never as typed keys. */
+const PASTE_OVER = 200;
+
+export function createChatView({ send, bracketed = () => true, mac = false, keyFilter = null,
+                                 onOpenTask = null, onCloseTask = null }) {
+  const root = el('div', 'cchat');
+  const scroll = el('div', 'cchat-scroll');
+  const head = el('div', 'tx-head');
+  const list = el('div', 'cchat-list');
+  const empty = el('div', 'tx-empty', 'Ask Claude anything.');
+  const status = el('div', 'cchat-status');
+  const inputRow = el('div', 'cchat-input');
+  // blank room UNDER the prompt line, so a new prompt can scroll to the top
+  // while the input stays right under the last reply
+  const tail = el('div', 'cchat-tail');
+  const caret = el('span', 'tx-caret', '>');
+  const input = el('textarea', 'cchat-ta');
+  input.rows = 1;
+  input.spellcheck = false;
+  const PLACEHOLDER = 'Message Claude…';
+  input.placeholder = PLACEHOLDER;
+  input.title = 'Enter sends · Shift+Enter new line · Esc interrupts · / commands are Claude Code\'s own';
+  // the context window, as Claude Code told its statusLine (the relay):
+  // a small bar, used part filled, green -> yellow -> peach -> red
+  const ctx = el('span', 'cchat-ctx');
+  const ctxFill = el('span', 'cchat-ctx-fill');
+  const ctxBar = el('span', 'cchat-ctx-bar');
+  ctxBar.append(ctxFill);
+  const ctxPct = el('span', 'cchat-ctx-pct');
+  ctx.append(el('span', 'cchat-ctx-label', 'ctx'), ctxBar, ctxPct);
+  ctx.hidden = true;
+  inputRow.append(caret, input, ctx);
+  // background tasks: a strip of chips above the prompt line, and the task
+  // view (one agent's transcript / one shell's output) in place of the chat
+  const strip = el('div', 'cchat-tasks');
+  strip.hidden = true;
+  const tview = el('div', 'cchat-tview');
+  tview.hidden = true;
+  const tvHead = el('div', 'cchat-tview-head');
+  const tvBack = el('button', 'cchat-tview-back', '← back to chat');
+  tvBack.type = 'button';
+  const tvTitle = el('b', 'cchat-tview-title', '');
+  const tvState = el('span', 'cchat-tview-state', '');
+  tvHead.append(tvBack, tvTitle, tvState);
+  const tvList = el('div', 'cchat-list');
+  const tvPre = el('pre', 'cchat-tview-out');
+  tvPre.hidden = true;
+  const tvNote = el('div', 'tx-empty', '');
+  tview.append(tvHead, tvList, tvPre, tvNote);
+  const tvRender = createRenderer(tvList, { briefs: true });
+  scroll.append(head, list, empty, tview, status, strip, inputRow, tail);
+  // the `/` dropdown lies over the transcript, next to the prompt line
+  const menu = el('div', 'cchat-menu');
+  menu.hidden = true;
+  menu.setAttribute('role', 'listbox');
+  root.append(scroll, menu);
+  head.append(el('span', 'tx-star', '✻'), el('b', '', ' Claude Code'));
+  const headProject = el('span', 'tx-dim', '');
+  head.append(headProject);
+
+  // follow new output while the prompt line is on screen; scrolling down
+  // into the blank room under it never pulls the view back up
+  let stick = true;
+  const inputVisible = () =>
+    inputRow.getBoundingClientRect().bottom <= scroll.getBoundingClientRect().bottom + 40;
+
+  scroll.addEventListener('scroll', () => { stick = inputVisible(); });
+
+  /** The chat's own items. */
+  const main = createRenderer(list, {
+    onTurn: () => sizeLast(),
+    onLayout: () => sizeLast(),
+    onTask: (it) => taskItem(it),
+  });
+
+  /** The newest turn, the status line and the prompt line together fill at
+   *  least the pane, padded by `tail` below the prompt line — so the turn's
+   *  prompt can sit at the TOP while the reply flows down under it (the
+   *  video's shape) and the input still follows the last reply directly. */
+  // …and always at least this share of the pane, so the person can scroll
+  // past the end to a blank view while typing
+  const TAIL_MIN = 0.6;
+  function sizeLast() {
+    // the task view follows its end instead: no blank room under it
+    if (openTask) { tail.style.height = '0px'; return; }
+    const floor = scroll.clientHeight * TAIL_MIN;
+    const turn = main.turn;
+    if (!turn) { tail.style.height = `${Math.round(floor)}px`; return; }
+    const used = inputRow.getBoundingClientRect().bottom - turn.getBoundingClientRect().top;
+    const h = scroll.clientHeight - used - 8;
+    tail.style.height = `${Math.round(Math.max(floor, h))}px`;
+  }
+
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(() => sizeLast());
+    ro.observe(scroll); ro.observe(list); ro.observe(inputRow);
+  }
+
+  /** A frame of items from the server. */
+  function take(frame) {
+    if (frame.reset) {
+      main.reset();
+      tasks.clear();
+      stick = !openTask;
+      if (frame.project !== undefined) {
+        headProject.textContent = frame.project ? ` · ${frame.project}` : '';
+      }
+    }
+    let snapTurn = null;   // a turn that just started: bring its prompt to the top
+    for (const it of frame.items || []) {
+      const t = main.add(it);
+      if (t) snapTurn = t;
+    }
+    paintTasks();
+    empty.hidden = list.childElementCount > 0;
+    sizeLast();
+    // the task view is on screen: the chat fills in underneath, unscrolled
+    if (openTask) return;
+    if (frame.reset) { toBottom(); return; }
+    if (snapTurn) {
+      // the video's shape: a new prompt starts at the TOP of the pane and
+      // the reply flows down under it (`tail` makes the room for it)
+      const t = snapTurn;
+      requestAnimationFrame(() => {
+        scroll.scrollTop = t.offsetTop - 8;
+        stick = inputVisible();
+      });
+      return;
+    }
+    if (stick) toBottom();
+  }
+
+  /** Bring the prompt line into view by scrolling DOWN only — never into
+   *  the blank room, never up out of it. */
+  function toBottom() {
+    requestAnimationFrame(() => {
+      const over = inputRow.getBoundingClientRect().bottom + 12 - scroll.getBoundingClientRect().bottom;
+      if (over > 0) scroll.scrollTop += over;
+    });
+  }
+
+  // ── background tasks: the strip above the prompt line, and the task view
+  //
+  // The transcript's
+  // task items (`transcript.mjs`) are folded into one record per task, keyed
+  // by the tool-use id that started it. A chip opens that task's own view —
+  // read-only: what is typed still goes to the chat's Claude.
+
+  /** key (tool-use id, else task id) -> {key, id, kind, label, status, start, end, out, summary} */
+  const tasks = new Map();
+  let openTask = null;       // {key, id, kind, out} while the task view is up
+  let taskTimer = null;
+
+  function taskKey(it) {
+    if (it.tool && tasks.has(it.tool)) return it.tool;
+    if (it.id) for (const [k, t] of tasks) if (t.id === it.id) return k;
+    return it.tool || null;
+  }
+
+  function taskItem(it) {
+    const key = taskKey(it);
+    if (!key) return;
+    let t = tasks.get(key);
+    if (!t) {
+      // a message to an agent this view never saw start: nothing to update
+      if (it.resumed) return;
+      t = { key, id: '', kind: '', label: '', status: 'running', start: null, end: null, out: '', summary: '' };
+      tasks.set(key, t);
+    }
+    if (it.id) t.id = it.id;
+    if (it.kind) t.kind = it.kind;
+    if (it.label && !t.label) t.label = it.label;
+    if (it.out) t.out = it.out;
+    if (it.summary) t.summary = it.summary;
+    if (!t.kind && t.id) t.kind = /^a[0-9a-f]{8,}$/.test(t.id) ? 'agent' : 'shell';
+    const at = Date.parse(it.at || '') || Date.now();
+    if (t.start === null) t.start = at;
+    const status = it.status || t.status;
+    if (status === 'running') t.end = null;
+    else if (status !== t.status || t.end === null) t.end = at;
+    t.status = status;
+    if (openTask?.key === key) paintTaskHead();
+  }
+
+  const taskLabel = (t) => t.label || main.toolArgs(t.key) || t.summary || t.id || 'task';
+
+  function visibleTasks(now = Date.now()) {
+    return [...tasks.values()]
+      .filter((t) => (t.status === 'running'
+        ? now - t.start < TASK_STALE_MS
+        : t.end !== null && now - t.end < TASK_LINGER_MS) || openTask?.key === t.key)
+      .sort((x, y) => x.start - y.start);
+  }
+
+  function paintTasks() {
+    const now = Date.now();
+    const shown = visibleTasks(now);
+    strip.hidden = shown.length === 0;
+    strip.replaceChildren(...shown.map((t) => {
+      const chip = el('button', 'cchat-task');
+      chip.type = 'button';
+      chip.dataset.tone = taskTone(t.status);
+      if (openTask?.key === t.key) chip.classList.add('open');
+      const label = taskLabel(t);
+      chip.append(el('span', 'cchat-task-dot', '●'),
+                  el('span', 'cchat-task-kind', t.kind === 'shell' ? '$' : '⧉'),
+                  el('span', 'cchat-task-label', label),
+                  el('span', 'cchat-task-time', duration((t.end ?? now) - t.start)));
+      const what = t.kind === 'shell' ? 'background shell' : 'background agent';
+      chip.title = `${label}\n${what} · ${t.status}${t.summary ? `\n${t.summary}` : ''}`
+        + (t.id ? '\nclick to view' : '\nnot started yet');
+      chip.disabled = !t.id;
+      // mousedown, not click: the input keeps the keyboard
+      chip.addEventListener('mousedown', (ev) => ev.preventDefault());
+      chip.addEventListener('click', () => {
+        if (openTask?.key === t.key) closeTaskView();
+        else openTaskView(t);
+      });
+      return chip;
+    }));
+    // a clock while anything is on the strip: elapsed time, and lingering
+    // chips leaving on time
+    if (shown.length && !taskTimer) taskTimer = setInterval(paintTasks, 1000);
+    else if (!shown.length && taskTimer) { clearInterval(taskTimer); taskTimer = null; }
+  }
+
+  function paintTaskHead() {
+    const t = openTask && tasks.get(openTask.key);
+    if (!t) return;
+    tvTitle.textContent = taskLabel(t);
+    tvState.textContent = ` · ${t.kind === 'shell' ? 'shell' : 'agent'} · ${t.status}`;
+    tvState.dataset.tone = taskTone(t.status);
+  }
+
+  let tvStick = true;
+
+  function openTaskView(t) {
+    if (!t.id) return;
+    openTask = { key: t.key, id: t.id, kind: t.kind, out: t.out };
+    tvRender.reset();
+    tvPre.textContent = '';
+    tvPre.hidden = t.kind !== 'shell';
+    tvNote.textContent = 'loading…';
+    tvNote.hidden = false;
+    tview.hidden = false;
+    head.hidden = true;
+    list.hidden = true;
+    empty.hidden = true;
+    input.placeholder = 'Message the main chat — this view is read-only…';
+    paintTaskHead();
+    paintTasks();
+    sizeLast();
+    tvStick = true;
+    scroll.scrollTop = 0;
+    onOpenTask?.({ kind: t.kind, id: t.id, out: t.out || undefined });
+  }
+
+  function closeTaskView() {
+    if (!openTask) return;
+    openTask = null;
+    tview.hidden = true;
+    tvRender.reset();
+    tvPre.textContent = '';
+    head.hidden = false;
+    list.hidden = false;
+    empty.hidden = list.childElementCount > 0;
+    input.placeholder = PLACEHOLDER;
+    onCloseTask?.();
+    paintTasks();
+    sizeLast();
+    stick = true;
+    toBottom();
+    input.focus({ preventScroll: true });
+  }
+
+  /** A `ttx` frame: the open task's content. */
+  function takeTask(frame) {
+    if (!openTask || String(frame.task) !== openTask.id) return;
+    if (frame.reset) {
+      tvRender.reset();
+      tvPre.textContent = '';
+      tvStick = true;
+    }
+    if (frame.missing) {
+      tvNote.textContent = openTask.kind === 'shell'
+        ? 'output not available — the file is gone or outside Claude Code\'s own directories'
+        : 'transcript not available';
+      tvNote.hidden = false;
+      return;
+    }
+    if (typeof frame.text === 'string') {
+      let txt = tvPre.textContent + frame.text;
+      if (frame.reset && frame.cut) txt = `…\n${txt}`;
+      if (txt.length > TASK_TEXT_MAX) txt = `…\n${txt.slice(-TASK_TEXT_MAX)}`;
+      tvPre.textContent = txt;
+      tvNote.hidden = Boolean(txt);
+      if (!txt) { tvNote.textContent = '(no output yet)'; tvNote.hidden = false; }
+    }
+    for (const it of frame.items || []) tvRender.add(it);
+    if (frame.items) {
+      tvNote.hidden = tvList.childElementCount > 0;
+      if (!tvNote.hidden) tvNote.textContent = '(nothing yet)';
+    }
+    if (tvStick) toBottom();
+  }
+
+  scroll.addEventListener('scroll', () => { if (openTask) tvStick = inputVisible(); });
+  tvBack.addEventListener('mousedown', (ev) => ev.preventDefault());
+  tvBack.addEventListener('click', () => closeTaskView());
+
+  function setRunning(on) {
+    status.textContent = on ? '✻ working…  esc to interrupt' : '';
+    status.classList.toggle('on', Boolean(on));
+  }
+
+  /** `{used, left}` percentages from the server's `ctx` frame; nothing
+   *  arrived = nothing shown (a window size is never guessed). */
+  function setContext(c) {
+    const used = Number(c?.used);
+    if (!c || !Number.isFinite(used)) { ctx.hidden = true; return; }
+    const u = Math.max(0, Math.min(100, used));
+    const left = Number.isFinite(Number(c.left)) ? Number(c.left) : 100 - u;
+    ctx.hidden = false;
+    ctxFill.style.width = `${u}%`;
+    ctx.dataset.level = u < 50 ? 'ok' : u < 70 ? 'warn' : u < 85 ? 'high' : 'full';
+    ctxPct.textContent = `${Math.round(u)}%`;
+    ctx.title = `Context: ${Math.round(u)}% used · ${Math.round(left)}% left`;
+  }
+
+  // ── the `/` dropdown: completes a command name, never runs one ──────
+
+  let menuItems = [];
+  let menuSel = 0;
+  let menuShown = false;
+
+  function menuQuery() {
+    const m = /^\/(\S*)$/.exec(input.value);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function updateMenu() {
+    const q = menuQuery();
+    if (q === null) { closeMenu(); return; }
+    const all = commandList();
+    if (!all) {
+      // a failed fetch leaves no list: no retry loop, the next `/` asks again
+      loadCommands().then(() => { if (commandList() && menuQuery() !== null) updateMenu(); });
+      closeMenu();
+      return;
+    }
+    const prefix = [];
+    const sub = [];
+    for (const c of all) {
+      const n = c.name.toLowerCase();
+      const bare = n.includes(':') ? n.slice(n.indexOf(':') + 1) : n;
+      if (n.startsWith(q) || bare.startsWith(q)) prefix.push(c);
+      else if (q && n.includes(q)) sub.push(c);
+    }
+    menuItems = prefix.concat(sub).slice(0, 60);
+    if (!menuItems.length) { closeMenu(); return; }
+    menuSel = 0;
+    menu.replaceChildren(...menuItems.map((c, i) => {
+      const row = el('div', 'cchat-menu-item');
+      row.setAttribute('role', 'option');
+      row.append(el('span', 'cchat-menu-name', `/${c.name}`),
+                 el('span', 'cchat-menu-desc', c.desc || ''));
+      row.title = c.desc ? `/${c.name} — ${c.desc}` : `/${c.name}`;
+      // mousedown, not click: the textarea keeps the keyboard
+      row.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        menuSel = i;
+        completeMenu();
+      });
+      return row;
+    }));
+    menu.hidden = false;
+    menuShown = true;
+    paintSel();
+    placeMenu();
+  }
+
+  function paintSel() {
+    menuItems.forEach((_, i) => {
+      menu.children[i]?.classList.toggle('sel', i === menuSel);
+      menu.children[i]?.setAttribute('aria-selected', String(i === menuSel));
+    });
+    const node = menu.children[menuSel];
+    if (node) {
+      if (node.offsetTop < menu.scrollTop) menu.scrollTop = node.offsetTop;
+      else if (node.offsetTop + node.offsetHeight > menu.scrollTop + menu.clientHeight) {
+        menu.scrollTop = node.offsetTop + node.offsetHeight - menu.clientHeight;
+      }
+    }
+  }
+
+  /** Below the prompt line when it fits, above it otherwise. */
+  function placeMenu() {
+    if (!menuShown) return;
+    const r = root.getBoundingClientRect();
+    const row = inputRow.getBoundingClientRect();
+    const left = Math.max(0, input.getBoundingClientRect().left - r.left - 4);
+    menu.style.left = `${left}px`;
+    menu.style.right = '10px';
+    const h = menu.offsetHeight;
+    const below = r.bottom - row.bottom;
+    if (below >= h + 4 || below >= row.top - r.top) {
+      menu.style.top = `${Math.round(row.top - r.top + Math.min(input.offsetHeight + 4, row.height))}px`;
+      menu.style.bottom = '';
+    } else {
+      menu.style.top = '';
+      menu.style.bottom = `${Math.round(r.bottom - row.top + 2)}px`;
+    }
+  }
+
+  function closeMenu() {
+    if (!menuShown) return;
+    menuShown = false;
+    menu.hidden = true;
+    menu.replaceChildren();
+    menuItems = [];
+  }
+
+  /** The picked name + a space in the input; the next Enter sends it. */
+  function completeMenu() {
+    const c = menuItems[menuSel];
+    if (!c) return;
+    input.value = `/${c.name} `;
+    closeMenu();
+    autosize();
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  function menuKey(ev) {
+    if (!menuShown) return false;
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      const n = menuItems.length;
+      menuSel = (menuSel + (ev.key === 'ArrowDown' ? 1 : -1) + n) % n;
+      paintSel();
+      return true;
+    }
+    if (ev.key === 'Escape') { closeMenu(); return true; }
+    if (ev.key === 'Tab' && !ev.shiftKey) { completeMenu(); return true; }
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.altKey) {
+      // the whole name typed already: Enter runs it, as in Claude Code
+      if (input.value.trim().toLowerCase() === `/${menuItems[menuSel]?.name}`.toLowerCase()) {
+        closeMenu();
+        return false;
+      }
+      completeMenu();
+      return true;
+    }
+    return false;
+  }
+
+  scroll.addEventListener('scroll', () => placeMenu());
+  input.addEventListener('blur', () => closeMenu());
+
+  // ── input: keystrokes into the real TUI ─────────────────────────────
+
+  function autosize() {
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  }
+  input.addEventListener('input', () => { autosize(); updateMenu(); });
+
+  function submit() {
+    const text = input.value;
+    input.value = '';
+    autosize();
+    if (!text.trim()) { send('\r'); return; }
+    // A multi-line message goes as one bracketed paste — a bare newline
+    // would submit the first line on its own. Enter follows separately: in
+    // the same chunk, Claude Code can take it for part of a paste.
+    // Anything long goes as a bracketed PASTE too, not as typing: a long
+    // single-line prompt typed in one burst reached Claude Code as its last
+    // 56 characters only, while a 13-line paste arrived whole.
+    if (text.includes('\n') || text.length > PASTE_OVER) {
+      send(bracketed() ? `\x1b[200~${text}\x1b[201~` : text.replace(/\n/g, ' '));
+    } else {
+      send(text);
+    }
+    // the Enter waits longer after a big paste so it lands after the paste
+    setTimeout(() => send('\r'), text.length > PASTE_OVER ? 250 : 60);
+    stick = true;
+  }
+
+  // A pasted image (a screenshot): Claude Code attaches it by reading the
+  // clipboard itself on Ctrl+V, so the key goes to the TUI and it shows up
+  // there as [Image #N], joining whatever is typed here when it is sent.
+  input.addEventListener('paste', (ev) => {
+    const items = [...(ev.clipboardData?.items || [])];
+    const hasImage = items.some((i) => i.kind === 'file' && i.type.startsWith('image/'));
+    const hasText = items.some((i) => i.kind === 'string' && i.type === 'text/plain');
+    if (!hasImage || hasText) return;
+    ev.preventDefault();
+    send('\x16');
+    const was = input.placeholder;
+    input.placeholder = 'Image attached — it goes with your next message…';
+    setTimeout(() => { if (input.placeholder.startsWith('Image attached')) input.placeholder = was; }, 5000);
+  });
+
+  input.addEventListener('keydown', (ev) => {
+    if (keyFilter?.(ev)) return;
+    if (ev.isComposing) return;
+    if (menuKey(ev)) { ev.preventDefault(); return; }
+    // Ctrl+Z suspends Claude Code with no shell to resume it: never sent
+    if (ev.ctrlKey && !ev.metaKey && (ev.key === 'z' || ev.key === 'Z')) {
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.altKey) {
+      ev.preventDefault();
+      submit();
+      return;
+    }
+    const bytes = keyBytes(ev, mac);
+    if (bytes) {
+      ev.preventDefault();
+      send(bytes);
+    }
+  });
+
+  // a click on the transcript that is not a text selection focuses the input
+  scroll.addEventListener('mouseup', () => {
+    if (String(globalThis.getSelection?.() || '')) return;
+    input.focus({ preventScroll: true });
+  });
+
+  return {
+    root,
+    take,
+    takeTask,
+    /** the open task view's task, to re-follow after a reconnect */
+    currentTask: () => (openTask ? { kind: openTask.kind, id: openTask.id, out: openTask.out || undefined } : null),
+    setRunning,
+    setContext,
+    focus: () => input.focus({ preventScroll: true }),
+    /** the person has a half-written message here */
+    hasDraft: () => input.value.trim().length > 0,
+    /** a key typed somewhere on the page that belongs to Claude */
+    typeInto(data) {
+      input.focus({ preventScroll: true });
+      if (/^[^\x00-\x1f\x7f]+$/.test(data)) {
+        input.value += data;
+        autosize();
+        updateMenu();
+      } else {
+        send(data);
+      }
+    },
+  };
+}
