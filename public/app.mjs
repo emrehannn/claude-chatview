@@ -18,6 +18,7 @@ import { Terminal } from './vendor/xterm/xterm.mjs';
 import { FitAddon } from './vendor/addon-fit/addon-fit.mjs';
 import { WebglAddon } from './vendor/addon-webgl/addon-webgl.mjs';
 import { createChatView, screenState } from './chatview.mjs';
+import { readScreen, messageAgent, agentReachable } from './agentpanel.mjs';
 
 const VIEW_KEY = 'claude-chatview.view';
 const FONT_KEY = 'claude-chatview.fontSize';
@@ -114,6 +115,7 @@ let fontSize = Number(store.get(FONT_KEY)) || FONT_DEFAULT;
 let tui = false;              // the terminal is showing a dialog
 let oddSince = null;
 let checkTimer = null;
+let driving = false;          // walking Claude Code's subagent panel for the task view
 let alive = false;
 let ended = null;             // {code, signal} once Claude Code has exited
 let cols = 0;
@@ -162,6 +164,10 @@ const view = createChatView({
   },
   onOpenTask: (task) => wsSend({ t: 'task', task }),
   onCloseTask: () => wsSend({ t: 'untask' }),
+  // the task view's prompt line: Claude Code's own subagent panel, walked
+  // key by key with the screen read after each (`agentpanel.mjs`)
+  messageAgent: (label, text) => driveAgent(label, text),
+  agentReachable: (label) => agentReachable(readScreen(term), label),
 });
 els.screen.append(view.root);
 
@@ -251,6 +257,9 @@ function checkScreen() {
   let st;
   try { st = screenState(term); } catch { st = { normal: false, blank: false, running: false }; }
   view.setRunning(st.running);
+  // walking the subagent panel for the chat view: the agent's transcript
+  // is on the TUI for a moment, and the task view stays where it is
+  if (driving) return;
   let next = tui;
   if (st.normal || st.blank) {
     oddSince = null;
@@ -368,6 +377,22 @@ function attach() {
   ptySize = `${cols}x${rows}`;
   attached = true;
   needsReplay = false;
+}
+
+/** One message to a background agent through the TUI's subagent panel. */
+async function driveAgent(label, text) {
+  if (driving) return { ok: false, sent: false, reason: 'Still sending the last message.' };
+  driving = true;
+  try {
+    return await messageAgent({
+      screen: () => readScreen(term),
+      send: (data) => sendInput(data),
+    }, { label, text, bracketed: term.modes?.bracketedPasteMode ?? true });
+  } finally {
+    driving = false;
+    oddSince = null;
+    scheduleCheck();
+  }
 }
 
 function sendInput(data) {

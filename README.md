@@ -21,8 +21,10 @@ What the chat view draws:
 - agent briefs and agent messages folded to one line, click to expand;
 - images (in prompts and tool results), click for full size; pasting a
   screenshot into the input attaches it (it sends Ctrl+V to Claude Code);
-- background agents and shells as chips above the prompt; click one to watch
-  its transcript or output (read-only);
+- background agents and shells as a stacked list above the prompt; click one
+  to watch its transcript or output. In an agent's view the input messages
+  that agent, through Claude Code's own subagent panel (the page presses the
+  keys and reads the screen after each); a shell's view is read-only;
 - a `/` dropdown with Claude Code's commands, your skills and plugins;
 - the context window as a small bar (optional, see below).
 
@@ -142,6 +144,7 @@ lib/        cli (the command), session (the pty), server + socket + ws,
             transcript (reads Claude Code's transcript), commands (the `/` list),
             browser (opens the window), runtime, statusline (the relay)
 public/     the page: app.mjs (terminal + view switching), chatview.mjs,
+            agentpanel.mjs (messaging an agent via the subagent panel),
             markdown.mjs, app.css, vendor/ (xterm.js 6, fonts)
 ```
 

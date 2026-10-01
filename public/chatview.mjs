@@ -19,6 +19,7 @@
  *     the terminal is shown: nobody may be left unable to answer a prompt.
  */
 import { renderMarkdown } from './markdown.mjs';
+import { panelState, UNREACHABLE } from './agentpanel.mjs';
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -29,6 +30,9 @@ const el = (tag, cls, text) => {
 
 /** a rule line: nothing but `─` (a narrow pane wraps it, leaving a stub) */
 const RULE = /^─{2,}\s*$/;
+/** the rule above the input may carry a label: the session's title, or an
+ *  open agent's description (`──── night watch ─`) */
+const RULE_ABOVE = /^─{2,}(?:\s.+?\s─+)?\s*$/;
 /** Claude Code's spinner line while it works: `✻ Cooking… (2s · ↓ 211 tokens …)` */
 const SPINNER = /^\S\s+\S.*…\s*\((?:\d+[hms]|esc|.*\btokens?\b)/;
 
@@ -39,7 +43,10 @@ const SPINNER = /^\S\s+\S.*…\s*\((?:\d+[hms]|esc|.*\btokens?\b)/;
  *             lines, near the bottom. True while Claude is working too (the
  *             input box stays up), false for every dialog and picker, which
  *             replace the input box (permission prompt, /config, /model,
- *             /resume, the trust dialog, AskUserQuestion…).
+ *             /resume, the trust dialog, AskUserQuestion…). False too while
+ *             a background agent's transcript is open in the TUI (its row
+ *             in the subagent panel carries the `⏺`): typing goes to that
+ *             agent there, so the chat view must not look like main.
  *   menu    — the prompt is up AND a slash-command list sits above it (the
  *             input starts with `/`): transient while a command is typed.
  *   blank   — nothing drawn yet (the TUI is starting).
@@ -59,13 +66,13 @@ export function screenState(term) {
   // the LAST prompt line that has a rule above it and a rule below it
   for (let i = lines.length - 1; i > 0; i -= 1) {
     if (!lines[i].startsWith('❯')) continue;
-    if (!RULE.test(lines[i - 1])) continue;
+    if (!RULE_ABOVE.test(lines[i - 1])) continue;
     let below = -1;
     for (let j = i + 1; j < Math.min(lines.length, i + 40); j += 1) {
       if (RULE.test(lines[j])) { below = j; break; }
     }
     if (below < 0) continue;
-    normal = true;
+    normal = panelState({ lines, cx: 0, cy: -1 }).onMain;
     menu = /^❯\s*\//.test(lines[i]) && /^\s+\/\S/.test(lines[i - 2] || '');
     break;
   }
@@ -281,7 +288,8 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   /** One item; returns the turn it started, if it started one. */
   function add(it) {
     // anything Claude says or does between two Bash calls closes the block
-    if (!['result', 'turn', 'task'].includes(it.k) && !(it.k === 'tool' && it.name === 'Bash')) {
+    // (queue bookkeeping and task updates draw nothing here, so they never split a block)
+    if (!['result', 'turn', 'task', 'unqueue', 'queued'].includes(it.k) && !(it.k === 'tool' && it.name === 'Bash')) {
       bash = null;
     }
     switch (it.k) {
@@ -441,12 +449,18 @@ const taskTone = (status) => (status === 'running' ? 'running'
  * @param {(task: {kind: string, id: string, out?: string}) => void} [o.onOpenTask]
  *        a task chip was opened: tail that task (`{t:'task'}` on the socket)
  * @param {() => void} [o.onCloseTask]  the task view was closed
+ * @param {(label: string, text: string) => Promise<{ok: boolean, sent: boolean, reason?: string}>} [o.messageAgent]
+ *        send to a background agent through Claude Code's subagent panel
+ *        (`agentpanel.mjs`, driven by the page)
+ * @param {(label: string) => boolean|null} [o.agentReachable]  is its row
+ *        in that panel now (null: the screen cannot tell)
  */
 /** A prompt longer than this is sent as a paste, never as typed keys. */
 const PASTE_OVER = 200;
 
 export function createChatView({ send, bracketed = () => true, mac = false, keyFilter = null,
-                                 onOpenTask = null, onCloseTask = null }) {
+                                 onOpenTask = null, onCloseTask = null,
+                                 messageAgent = null, agentReachable = null }) {
   const root = el('div', 'cchat');
   const scroll = el('div', 'cchat-scroll');
   const head = el('div', 'tx-head');
@@ -490,7 +504,10 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
   const tvPre = el('pre', 'cchat-tview-out');
   tvPre.hidden = true;
   const tvNote = el('div', 'tx-empty', '');
-  tview.append(tvHead, tvList, tvPre, tvNote);
+  // a send to the agent that did not go through: one line, until the next try
+  const tvMsg = el('div', 'cchat-tview-msg', '');
+  tvMsg.hidden = true;
+  tview.append(tvHead, tvList, tvPre, tvNote, tvMsg);
   const tvRender = createRenderer(tvList, { briefs: true });
   scroll.append(head, list, empty, tview, status, strip, inputRow, tail);
   // the `/` dropdown lies over the transcript, next to the prompt line
@@ -664,8 +681,73 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     }));
     // a clock while anything is on the strip: elapsed time, and lingering
     // chips leaving on time
+    paintAgentInput();
     if (shown.length && !taskTimer) taskTimer = setInterval(paintTasks, 1000);
     else if (!shown.length && taskTimer) { clearInterval(taskTimer); taskTimer = null; }
+  }
+
+  // ── messaging the open agent ───────────────────────────────────────
+  // With an agent's view open, the prompt line sends to THAT agent —
+  // through Claude Code's own subagent panel, driven by the page
+  // (`agentpanel.mjs`), so it is Claude Code's mechanism, not a new one.
+  // A shell's view stays read-only: what is typed goes to the main chat.
+  let agentBusy = false;
+  const agentOpen = () => Boolean(openTask && openTask.kind === 'agent' && messageAgent);
+
+  function agentPlaceholder() {
+    const t = openTask && tasks.get(openTask.key);
+    return `Message ${t ? taskLabel(t) : 'this agent'}…`;
+  }
+
+  /** The input follows whether the agent's row is in Claude Code's panel. */
+  function paintAgentInput() {
+    if (!agentOpen() || agentBusy) return;
+    const t = tasks.get(openTask.key);
+    const r = agentReachable?.(t ? taskLabel(t) : '');
+    if (r === false) {
+      input.disabled = true;
+      input.placeholder = t?.status === 'running'
+        ? 'Can\'t message this agent from here — its row is not in Claude Code\'s panel.'
+        : 'This agent has finished and its row is no longer in Claude Code\'s panel — it can\'t be messaged from here.';
+    } else if (r === true && input.disabled) {
+      input.disabled = false;
+      input.placeholder = agentPlaceholder();
+    }
+  }
+
+  function agentNotice(text) {
+    tvMsg.textContent = text || '';
+    tvMsg.hidden = !text;
+  }
+
+  /** Enter in an agent's view: the text goes to that agent, or stays here. */
+  function submitToAgent() {
+    const text = input.value;
+    if (!text.trim() || agentBusy) return;
+    const t = tasks.get(openTask.key);
+    const label = t ? taskLabel(t) : '';
+    const key = openTask.key;
+    agentBusy = true;
+    agentNotice('');
+    input.readOnly = true;
+    input.placeholder = `Sending to ${label}…`;
+    Promise.resolve()
+      .then(() => messageAgent(label, text))
+      .catch(() => ({ ok: false, sent: false, reason: UNREACHABLE }))
+      .then((r) => {
+        agentBusy = false;
+        input.readOnly = false;
+        // sent = it is in the agent's prompt: never offered for a second send
+        if (r?.sent && input.value === text) { input.value = ''; autosize(); }
+        if (openTask?.key === key) {
+          agentNotice(r?.ok && !r.reason ? '' : r?.reason || UNREACHABLE);
+          input.placeholder = agentPlaceholder();
+          paintAgentInput();
+          tvStick = true;
+          toBottom();
+        }
+        input.focus({ preventScroll: true });
+      });
   }
 
   function paintTaskHead() {
@@ -690,7 +772,10 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     head.hidden = true;
     list.hidden = true;
     empty.hidden = true;
-    input.placeholder = 'Message the main chat — this view is read-only…';
+    agentNotice('');
+    input.placeholder = agentOpen() ? agentPlaceholder()
+      : 'Message the main chat — this view is read-only…';
+    paintAgentInput();
     paintTaskHead();
     paintTasks();
     sizeLast();
@@ -709,6 +794,8 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     list.hidden = false;
     empty.hidden = list.childElementCount > 0;
     input.placeholder = PLACEHOLDER;
+    input.disabled = false;
+    agentNotice('');
     onCloseTask?.();
     paintTasks();
     sizeLast();
@@ -909,6 +996,9 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
   input.addEventListener('input', () => { autosize(); updateMenu(); });
 
   function submit() {
+    // the page is walking Claude Code's panel: no key of ours in between
+    if (agentBusy) return;
+    if (agentOpen()) { submitToAgent(); return; }
     const text = input.value;
     input.value = '';
     autosize();
@@ -936,7 +1026,7 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     const items = [...(ev.clipboardData?.items || [])];
     const hasImage = items.some((i) => i.kind === 'file' && i.type.startsWith('image/'));
     const hasText = items.some((i) => i.kind === 'string' && i.type === 'text/plain');
-    if (!hasImage || hasText) return;
+    if (!hasImage || hasText || agentBusy) return;
     ev.preventDefault();
     send('\x16');
     const was = input.placeholder;
@@ -947,6 +1037,7 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
   input.addEventListener('keydown', (ev) => {
     if (keyFilter?.(ev)) return;
     if (ev.isComposing) return;
+    if (agentBusy) { if (ev.key === 'Enter' || keyBytes(ev, mac)) ev.preventDefault(); return; }
     if (menuKey(ev)) { ev.preventDefault(); return; }
     // Ctrl+Z suspends Claude Code with no shell to resume it: never sent
     if (ev.ctrlKey && !ev.metaKey && (ev.key === 'z' || ev.key === 'Z')) {
@@ -984,6 +1075,7 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     hasDraft: () => input.value.trim().length > 0,
     /** a key typed somewhere on the page that belongs to Claude */
     typeInto(data) {
+      if (agentBusy) return;
       input.focus({ preventScroll: true });
       if (/^[^\x00-\x1f\x7f]+$/.test(data)) {
         input.value += data;

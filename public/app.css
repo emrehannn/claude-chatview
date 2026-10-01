@@ -114,7 +114,8 @@ body {
 .tx-tool .tx-dot.err { color: #f38ba8; }
 @keyframes tx-blink { 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .tx-tool .tx-dot.pending { animation: none; } }
-.tx-tname { color: #cdd6f4; font-weight: 700; }
+/* tool and command names (Bash, Read, Agent…): purple */
+.tx-tname { color: #cba6f7; font-weight: 700; }
 .tx-peer .tx-dot { color: #cba6f7; }
 /* images from the transcript: thumbnails, a click shows one full size */
 .tx-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
@@ -171,10 +172,20 @@ body {
 .tx-text .tx-md table { border-collapse: collapse; font-size: .92em; }
 .tx-text .tx-md th, .tx-text .tx-md td { border: 1px solid #45475a; padding: 2px 6px; }
 .tx-text .tx-md .md-table { overflow-x: auto; margin: 0 0 .6em; }
-.tx-text .tx-md strong { color: #f5e0dc; }
+/* bold in Claude's replies: Claude's own orange */
+.tx-text .tx-md strong, .tx-xfull strong { color: #d97757; }
 /* nothing in the transcript column may be squeezed: a flex child shrunk to
    0 px spills its text over the prompt line below it */
 .cchat-scroll > * { flex-shrink: 0; }
+/* nothing in the transcript may widen the page: every level may shrink,
+   wide blocks scroll inside themselves, and the column itself never scrolls
+   sideways */
+.cchat-scroll { overflow-x: hidden; }
+.cchat-list, .tx-turn, .tx-resp, .tx-item, .tx-body, .tx-xfull, .tx-brows, .tx-brow,
+.cchat-input, .tx-imgs { min-width: 0; max-width: 100%; }
+.cchat pre { max-width: 100%; overflow-x: auto; }
+.cchat .tx-md table { display: block; max-width: 100%; overflow-x: auto; }
+.cchat .tx-xprev, .cchat .tx-targs, .cchat .tx-utext, .cchat .tx-rtext { overflow-wrap: anywhere; word-break: break-word; }
 .cchat-status { color: #fab387; padding: 0; }
 .cchat-status.on { padding: 0 0 6px; }
 /* the prompt line: no box, the transcript's own `>` — right under the last
@@ -216,17 +227,22 @@ body {
 .cchat-menu-item.sel .cchat-menu-desc { color: #a6adc8; }
 .cview { min-width: 64px; }
 .cview.fallback { color: #fab387; border-color: #fab387; }
-/* background tasks: a chip per agent / shell above the prompt line (running
-   = pulsing peach, done = green, failed / killed = red), and the task view */
-.cchat-tasks { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 8px; }
+/* background tasks: one stacked list of connected rows above the prompt line,
+   full width like a table (running = pulsing peach, done = green, failed /
+   killed = red), and the task view */
+.cchat-tasks { display: flex; flex-direction: column; padding: 2px 0 8px; }
 .cchat-tasks[hidden], .cchat-tview[hidden], .cchat-tview-out[hidden] { display: none; }
-.cchat-task { display: inline-flex; align-items: center; gap: 6px; max-width: 34ch;
-              padding: 1px 8px; border: 1px solid #45475a; border-radius: 10px;
-              background: rgba(49, 50, 68, .45); color: #bac2de; font: inherit;
+.cchat-task { display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
+              padding: 2px 8px; border: 1px solid #45475a; border-radius: 0; margin: 0;
+              background: rgba(49, 50, 68, .45); color: #bac2de; font: inherit; text-align: left;
               font-size: .85em; line-height: 1.6; cursor: pointer; }
+.cchat-task + .cchat-task { border-top-width: 0; }
+.cchat-task:first-child { border-top-left-radius: 4px; border-top-right-radius: 4px; }
+.cchat-task:last-child { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
+.cchat-task-label { flex: 1 1 auto; }
 .cchat-task:hover:not(:disabled) { border-color: #6c7086; background: #313244; }
 .cchat-task:disabled { cursor: default; opacity: .7; }
-.cchat-task.open { border-color: #fab387; color: #cdd6f4; }
+.cchat-task.open { color: #cdd6f4; background: #313244; box-shadow: inset 2px 0 0 #fab387; }
 .cchat-task-dot { flex: 0 0 auto; font-size: .8em; color: #7f849c; }
 .cchat-task[data-tone="running"] .cchat-task-dot { color: #fab387; animation: tx-blink 1.2s ease-in-out infinite; }
 .cchat-task[data-tone="done"] .cchat-task-dot { color: #a6e3a1; }
@@ -249,3 +265,7 @@ body {
 .cchat-tview-out { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #bac2de;
                    font: inherit; font-size: .92em; }
 .tx-brief .tx-xprev { color: #89b4fa; }
+/* a message to the open agent that did not go through */
+.cchat-tview-msg { color: #f9e2af; font-size: .9em; padding: 2px 0; }
+.cchat-tview-msg[hidden] { display: none; }
+.cchat-ta:disabled { opacity: .6; cursor: not-allowed; }
