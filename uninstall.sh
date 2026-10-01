@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reverse ./install.sh: the ~/.local/bin links (only ones pointing here), the
-# claude-chatview block in ~/.bashrc / ~/.zshrc, and the statusLine (put back
+# claude-chatview block in ~/.bashrc / ~/.zshrc, the fish functions, and the statusLine (put back
 # to what it was before install.sh, only if it is still the relay).
 #
 #   ./uninstall.sh          show the plan, ask once
@@ -37,15 +37,21 @@ RCS=()
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   [ -f "$rc" ] && grep -qF "$MARK_BEGIN" "$rc" && RCS+=("$rc")
 done
+FISHF=()
+for f in claude claude-plain; do
+  ff="${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions/$f.fish"
+  [ -f "$ff" ] && grep -qF "$MARK_BEGIN" "$ff" && FISHF+=("$ff")
+done
 STATUS=0
 if [ -f "$SETTINGS" ] && grep -q 'claude-chatview-statusline' "$SETTINGS"; then STATUS=1; fi
 
-if [ "${#LINKS[@]}" -eq 0 ] && [ "${#RCS[@]}" -eq 0 ] && [ "$STATUS" = 0 ]; then
+if [ "${#LINKS[@]}" -eq 0 ] && [ "${#RCS[@]}" -eq 0 ] && [ "${#FISHF[@]}" -eq 0 ] && [ "$STATUS" = 0 ]; then
   say "nothing to undo."
   exit 0
 fi
 say "will:"
 for l in ${LINKS[@]+"${LINKS[@]}"}; do echo "  remove link $l"; done
+for ff in ${FISHF[@]+"${FISHF[@]}"}; do echo "  remove $ff"; done
 for rc in ${RCS[@]+"${RCS[@]}"}; do echo "  remove the claude-chatview block from $rc (backup: $rc.claude-chatview.bak)"; done
 [ "$STATUS" = 1 ] && echo "  restore your previous statusLine in $SETTINGS (backup: $SETTINGS.claude-chatview.bak)"
 
@@ -56,6 +62,7 @@ if [ "$YES" != 1 ]; then
 fi
 
 for l in ${LINKS[@]+"${LINKS[@]}"}; do rm -f "$l"; done
+for ff in ${FISHF[@]+"${FISHF[@]}"}; do rm -f "$ff"; done
 for rc in ${RCS[@]+"${RCS[@]}"}; do
   cp "$rc" "$rc.claude-chatview.bak"
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" '

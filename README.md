@@ -109,18 +109,23 @@ cd ~/claude-chatview
 ### What `install.sh` does
 
 It checks node, runs `npm ci`, and links `claude-chatview` and
-`claude-chatview-statusline` into `~/.local/bin`. Then it **asks** (default
-no) before each optional change:
+`claude-chatview-statusline` into `~/.local/bin`. Then, without asking, it:
 
-1. set the statusLine relay in `~/.claude/settings.json` (for the context bar);
-2. add to `~/.bashrc` / `~/.zshrc`:
+1. sets the statusLine relay in `~/.claude/settings.json` (for the context bar,
+   with a backup and your previous statusLine kept);
+2. makes `claude` open the window and adds `claude-plain` for plain Claude Code —
+   in `~/.bashrc` / `~/.zshrc`:
 
    ```sh
    claude() { claude-chatview "$@"; }
    alias claude-plain='command claude'
    ```
 
-`./install.sh --yes` answers yes to both.
+   and, if fish is installed, as `~/.config/fish/functions/claude.fish` and
+   `claude-plain.fish`.
+
+`./install.sh --ask` asks before each of the two instead (default yes).
+`./uninstall.sh` reverses all of it.
 
 ## Usage
 

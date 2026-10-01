@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Install claude-chatview for the current user.
 #
-#   ./install.sh          ask before each optional step (default: no)
-#   ./install.sh --yes    answer yes to every optional step
+#   ./install.sh          install everything, no questions
+#   ./install.sh --ask    ask before each optional step (default: yes)
 #
-# Always: checks node >= 18, installs the one npm dependency (node-pty),
-# links bin/ into ~/.local/bin. Optional, asked first, never silent:
-#   * the statusLine relay in ~/.claude/settings.json (the context bar),
+# Checks node >= 18, installs the one npm dependency (node-pty), links bin/
+# into ~/.local/bin, and by default also:
+#   * sets the statusLine relay in ~/.claude/settings.json (the context bar),
 #     keeping your previous statusLine so the relay can still draw it;
-#   * `claude` -> claude-chatview in ~/.bashrc / ~/.zshrc, plus
+#   * makes `claude` open claude-chatview in bash, zsh and fish, plus
 #     `claude-plain` for plain Claude Code.
 # ./uninstall.sh reverses all of it.
 set -euo pipefail
@@ -20,10 +20,11 @@ CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-chatview"
 MARK_BEGIN='# >>> claude-chatview >>>'
 MARK_END='# <<< claude-chatview <<<'
 
-YES=0
+YES=1
 for a in "$@"; do
   case "$a" in
     -y|--yes) YES=1 ;;
+    --ask) YES=0 ;;
     -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
@@ -36,10 +37,10 @@ ask() {   # ask "question" -> 0 for yes
   if [ "$YES" = 1 ]; then return 0; fi
   local reply=''
   if [ -r /dev/tty ]; then
-    printf '%s [y/N] ' "$1" > /dev/tty
+    printf '%s [Y/n] ' "$1" > /dev/tty
     read -r reply < /dev/tty || reply=''
   fi
-  case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+  case "$reply" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
 }
 
 build_deps_hint() {
@@ -156,22 +157,47 @@ add_block() {   # add_block <rc file>
   say "added to $rc"
 }
 
+add_fish() {   # fish reads neither rc file: autoloaded function files instead
+  local dir="$FISH_FUNCS"
+  mkdir -p "$dir"
+  if [ -f "$dir/claude.fish" ] && ! grep -qF "$MARK_BEGIN" "$dir/claude.fish"; then
+    say "$dir/claude.fish exists and is not ours; left untouched."
+    return
+  fi
+  printf '%s\n' "$MARK_BEGIN" \
+    'function claude --description "Claude Code in the claude-chatview window"' \
+    '    claude-chatview $argv' 'end' "$MARK_END" > "$dir/claude.fish"
+  printf '%s\n' "$MARK_BEGIN" \
+    'function claude-plain --description "Plain Claude Code"' \
+    '    command claude $argv' 'end' "$MARK_END" > "$dir/claude-plain.fish"
+  say "added $dir/claude.fish and claude-plain.fish"
+}
+
+FISH_FUNCS="${XDG_CONFIG_HOME:-$HOME/.config}/fish/functions"
 RCS=()
 [ -f "$HOME/.bashrc" ] && RCS+=("$HOME/.bashrc")
 [ -f "$HOME/.zshrc" ] && RCS+=("$HOME/.zshrc")
 if [ "${#RCS[@]}" -eq 0 ]; then
   case "${SHELL:-}" in
     */zsh) RCS+=("$HOME/.zshrc") ;;
+    */fish) ;;
     *) RCS+=("$HOME/.bashrc") ;;
   esac
+fi
+FISH=0
+if command -v fish >/dev/null 2>&1 || [ -d "$(dirname "$FISH_FUNCS")" ]; then
+  FISH=1
+  RCS+=("$FISH_FUNCS/claude.fish")
 fi
 echo
 say "Optional: make \`claude\` open the window, with \`claude-plain\` for plain"
 say "Claude Code. (Non-interactive uses — claude -p, claude mcp, pipes, ssh"
 say "without a display — still run plain claude.)"
 if ask "Add this to ${RCS[*]}?"; then
-  for rc in "${RCS[@]}"; do add_block "$rc"; done
-  say "open a new shell (or: source ${RCS[0]}) to use it."
+  for rc in "${RCS[@]}"; do
+    case "$rc" in *.fish) add_fish ;; *) add_block "$rc" ;; esac
+  done
+  say "open a new shell to use it."
 else
   say "skipped — run claude-chatview directly."
 fi
