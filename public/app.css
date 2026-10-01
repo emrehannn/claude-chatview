@@ -127,7 +127,13 @@ body {
 .tx-lightbox img { max-width: 94vw; max-height: 94vh; object-fit: contain; border-radius: 6px; }
 /* back-to-back Bash calls: one block, one line per call */
 .tx-bcount { color: #6c7086; font-size: .9em; }
-.tx-brows { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+/* one call: name and description on one line; several: a count line, then ⎿ rows */
+.tx-bashbody:not(.multi) { display: flex; align-items: baseline; gap: 1ch; }
+.tx-bashbody:not(.multi) > .tx-bhead { flex: 0 0 auto; }
+.tx-brows { display: flex; flex-direction: column; gap: 1px; flex: 1 1 auto; min-width: 0; }
+.tx-bashbody.multi .tx-brows { margin-top: 2px; }
+.tx-belbow { flex: 0 0 auto; color: #6c7086; margin-right: 1ch; }
+.tx-bashbody:not(.multi) .tx-belbow { display: none; }
 .tx-brow .tx-xhead { display: flex; align-items: baseline; }
 .tx-bdesc { color: #a6adc8; min-width: 0; overflow-wrap: anywhere; }
 .tx-brow.pending .tx-bdesc { color: #7f849c; }
@@ -152,6 +158,9 @@ body {
 .tx-user .tx-caret, .cchat-input .tx-caret { color: #9399b2; flex: 0 0 auto; }
 .tx-utext { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .tx-cmd .tx-utext { color: #cba6f7; }
+.tx-imgtag { color: #89b4fa; background: rgba(137,180,250,.12); border-radius: 3px; padding: 0 4px; font-size: .92em; }
+.cchat-imgnote { color: #f9e2af; font-size: .9em; padding: 2px 0 0 calc(1ch + 10px); }
+.cchat-imgnote[hidden] { display: none; }
 .tx-queued { opacity: .6; }
 .tx-note { color: #7f849c; text-align: center; font-size: .9em; }
 /* assistant text is markdown (`markdown.mjs`, every byte escaped) */
@@ -233,16 +242,17 @@ body {
 .cchat-tasks { display: flex; flex-direction: column; padding: 2px 0 8px; }
 .cchat-tasks[hidden], .cchat-tview[hidden], .cchat-tview-out[hidden] { display: none; }
 .cchat-task { display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box;
-              padding: 2px 8px; border: 1px solid #45475a; border-radius: 0; margin: 0;
-              background: rgba(49, 50, 68, .45); color: #bac2de; font: inherit; text-align: left;
+              padding: 2px 8px; border: 1px solid #313244; border-radius: 0; margin: 0;
+              background: transparent; color: #bac2de; font: inherit; text-align: left;
               font-size: .85em; line-height: 1.6; cursor: pointer; }
 .cchat-task + .cchat-task { border-top-width: 0; }
 .cchat-task:first-child { border-top-left-radius: 4px; border-top-right-radius: 4px; }
 .cchat-task:last-child { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
 .cchat-task-label { flex: 1 1 auto; }
-.cchat-task:hover:not(:disabled) { border-color: #6c7086; background: #313244; }
+.cchat-task:hover:not(:disabled) { background: rgba(255, 255, 255, .04); }
 .cchat-task:disabled { cursor: default; opacity: .7; }
-.cchat-task.open { color: #cdd6f4; background: #313244; box-shadow: inset 2px 0 0 #fab387; }
+.cchat-task.open { color: #cdd6f4; background: rgba(255, 255, 255, .04); box-shadow: inset 2px 0 0 #fab387; }
+.cchat-task-desc, .cchat-task-sep { color: #7f849c; }
 .cchat-task-dot { flex: 0 0 auto; font-size: .8em; color: #7f849c; }
 .cchat-task[data-tone="running"] .cchat-task-dot { color: #fab387; animation: tx-blink 1.2s ease-in-out infinite; }
 .cchat-task[data-tone="done"] .cchat-task-dot { color: #a6e3a1; }
@@ -269,3 +279,11 @@ body {
 .cchat-tview-msg { color: #f9e2af; font-size: .9em; padding: 2px 0; }
 .cchat-tview-msg[hidden] { display: none; }
 .cchat-ta:disabled { opacity: .6; cursor: not-allowed; }
+
+/* live replies ease in: a new item fades up; a reply's blocks follow each
+   other ~70 ms apart (the transcript logs a reply whole, so this stands in
+   for token streaming) */
+@keyframes tx-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.tx-item.tx-new { animation: tx-in .28s ease-out both; }
+.tx-reveal > * { animation: tx-in .32s ease-out both; animation-delay: calc(var(--i, 0) * 70ms); }
+@media (prefers-reduced-motion: reduce) { .tx-item.tx-new, .tx-reveal > * { animation: none; } }

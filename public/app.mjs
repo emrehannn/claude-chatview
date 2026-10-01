@@ -168,6 +168,8 @@ const view = createChatView({
   // key by key with the screen read after each (`agentpanel.mjs`)
   messageAgent: (label, text) => driveAgent(label, text),
   agentReachable: (label) => agentReachable(readScreen(term), label),
+  // image paste reads the `[Image #N]` Claude Code put in its input
+  screen: () => readScreen(term),
 });
 els.screen.append(view.root);
 
@@ -431,6 +433,7 @@ function onFrame(msg) {
       break;
     case 'tx': view.take(msg); break;
     case 'ttx': view.takeTask(msg); break;
+    case 'tpeek': view.takePeek(msg); break;
     case 'ctx': view.setContext(msg); break;
     case 'resync':
       needsReplay = true;

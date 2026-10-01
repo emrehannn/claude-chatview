@@ -30,11 +30,11 @@ commands, `Esc` to interrupt, `Shift+Tab` modes, `!` shell commands, subagents,
 - **A chat, not a scrollback.** Your prompts on top with the time you sent
   them; Claude's turn between two orange lines — replies as markdown, tool
   calls with purple names and a one-line `⎿` result.
-- **Bash runs fold into one block.** Back-to-back Bash calls become one line
-  each, saying what the command is *for*. Click a line for the command and its
-  output.
+- **Bash runs fold into one block.** A single Bash call is one line —
+  `● Bash  what it is for ▸`. Back-to-back calls become one `Bash · N commands`
+  block with a `⎿` row per command. Click a row for the command and its output.
 
-  <img src="docs/images/bash.png" alt="A Bash block folded to one line per command, and the same block with two lines opened to show the command and its output" width="100%">
+  <img src="docs/images/bash.png" alt="A single Bash call on one line; four back-to-back calls folded into one block with a ⎿ row each; the same block with two rows opened to show the command and its output" width="100%">
 
 - **Commands at your fingertips.** Type `/` for a dropdown of Claude Code's
   commands, your skills and your plugins. It only completes the text — Claude
@@ -43,15 +43,18 @@ commands, `Esc` to interrupt, `Shift+Tab` modes, `!` shell commands, subagents,
   <img src="docs/images/commands.png" alt="The slash-command dropdown listing built-in commands next to project skills" width="100%">
 
 - **Background work you can see — and talk to.** Background agents and shells
-  sit in a stacked list above the prompt with their running time. Open an agent
+  sit in a stacked list above the prompt with their running time and what each
+  is doing right now — an agent's latest tool call or reply line, a shell's
+  last output line (`Check contrast… · Read src/components/Toast.css`). Open an agent
   to read its transcript as it works; the input then messages *that* agent,
   through Claude Code's own subagent panel. A shell opens its live output.
 
-  <img src="docs/images/agent.png" alt="A background agent's own transcript opened from the task list, with the input reading 'Message Check contrast in dark mode…'" width="100%">
+  <img src="docs/images/agent.png" alt="A background agent's own transcript opened from the task list, whose rows show each task's latest activity, with the input reading 'Message Check contrast in dark mode…'" width="100%">
 
 - **Images inline.** Screenshots in prompts and tool results are drawn as
   thumbnails; click one for full size. Pasting a screenshot into the input
-  attaches it.
+  puts Claude Code's own `[Image #N]` token there — delete the token and the
+  image goes with it.
 
   <img src="docs/images/images.png" alt="A screenshot read by Claude, opened full size over the chat" width="100%">
 
@@ -64,6 +67,8 @@ commands, `Esc` to interrupt, `Shift+Tab` modes, `!` shell commands, subagents,
   <img src="docs/images/terminal.png" alt="The same session side by side: the chat view, and Claude Code's own terminal screen" width="100%">
 
 - Agent briefs and messages from agents fold to one line; click to expand.
+- `AskUserQuestion` shows its question; click for the options, and the answer
+  reads `answered: <choice>`.
 - A small context-window bar (optional, see [below](#the-context-bar)).
 - Catppuccin Mocha, with JetBrains Mono Nerd Font bundled.
 
@@ -193,7 +198,8 @@ not show.
 - **It follows Claude Code's transcript format** and recognises its prompt on
   screen. A Claude Code update that changes either can make the chat view miss
   things — the terminal is always one key away.
-- **Turns appear tool by tool**, as Claude Code writes them, not token by token.
+- **Turns appear tool by tool**, as Claude Code writes them, not token by token
+  (Claude Code logs a reply whole; its paragraphs ease in one after another).
 - **Linux is the target, but not fully verified yet**: node-pty compiling on
   your distro and the window opening are the untested parts.
 - **Wayland**: a session starts when `WAYLAND_DISPLAY` is set and opens the

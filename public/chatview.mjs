@@ -80,6 +80,36 @@ export function screenState(term) {
   return { normal, blank, running, menu };
 }
 
+/** `text` without these `[Image #N]` tokens, nor the space beside each */
+function withoutTokens(text, toks) {
+  let v = text;
+  for (const tok of toks) {
+    const esc = tok.replace(/[[\]#]/g, '\\$&');
+    v = v.replace(new RegExp(`( ?)${esc}( ?)`, 'g'), (m, a, b) => (a && b ? ' ' : ''));
+  }
+  return v;
+}
+
+/**
+ * The `[Image #N]` placeholders in the TUI's own input box, in order; null
+ * when no prompt is on screen. Claude Code (2.1.286, measured) inserts one
+ * per Ctrl+V — `[Image #1]`, then ` [Image #2]` — numbered on from the last
+ * one ever pasted (a deleted number is not reused), and wraps a long input
+ * onto `  `-indented rows, sometimes inside a token (`[Image` / `#10]`):
+ * the rows are joined and whitespace dropped before matching.
+ */
+export function tuiImages(scr) {
+  const st = panelState(scr);
+  if (st.prompt < 0) return null;
+  const rows = [];
+  for (let j = st.prompt; j < scr.lines.length; j += 1) {
+    if (j > st.prompt && RULE.test(scr.lines[j])) break;
+    rows.push(scr.lines[j].slice(2));
+  }
+  return [...rows.join('').replace(/\s+/g, '').matchAll(/\[Image#(\d+)\]/g)]
+    .map((m) => `[Image #${m[1]}]`);
+}
+
 // ── the `/` dropdown's list, shared by every chat ─────────────────────
 // `GET api/commands` (server-side `lib/commands.mjs`: Claude Code's
 // built-ins, project + user skills and commands, enabled plugins'), kept
@@ -202,6 +232,8 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   // back-to-back Bash calls share one `● Bash` block: one line per call (what
   // it is for), the command and its output only on click
   let bash = null;
+  // items arriving live (not a first look / replay) ease in
+  let live = false;
 
   function newTurn() {
     bash = null;
@@ -224,6 +256,7 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
     row.append(el('span', `tx-dot ${dotCls || ''}`.trim(), '●'));
     const body = el('div', 'tx-body');
     row.append(body);
+    if (live) row.classList.add('tx-new');
     respBox().append(row);
     return body;
   }
@@ -231,24 +264,28 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   function bashPaint(g) {
     g.dot.classList.toggle('pending', g.pending > 0);
     g.dot.classList.toggle('err', g.err > 0);
-    g.count.textContent = g.n > 1 ? `  · ${g.n} commands` : '';
+    g.count.textContent = g.n > 1 ? ` · ${g.n} commands` : '';
+    g.body.classList.toggle('multi', g.n > 1);
   }
 
   function bashRow(it) {
     if (!bash) {
       const body = dotLine('tx-tool tx-bash', 'pending');
+      // one call: `● Bash  what it is for ▸` on one line; several: a
+      // `● Bash · N commands` line with each call under it behind ⎿
       const count = el('span', 'tx-bcount', '');
       const head = el('div', 'tx-bhead');
       head.append(el('b', 'tx-tname', 'Bash'), count);
       const rows = el('div', 'tx-brows');
+      body.classList.add('tx-bashbody');
       body.append(head, rows);
-      bash = { rows, count, dot: body.parentElement.querySelector('.tx-dot'), n: 0, pending: 0, err: 0 };
+      bash = { body, rows, count, dot: body.parentElement.querySelector('.tx-dot'), n: 0, pending: 0, err: 0 };
     }
     const g = bash;
     const row = el('div', 'tx-brow pending');
     const line = el('div', 'tx-xhead');
     const more = el('span', 'tx-xmore', '  ▸');
-    line.append(el('span', 'tx-bdesc', it.args || '(command)'), more);
+    line.append(el('span', 'tx-belbow', '⎿'), el('span', 'tx-bdesc', it.args || '(command)'), more);
     const full = el('div', 'tx-xfull tx-md');
     full.hidden = true;
     row.append(line, full);
@@ -311,7 +348,14 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
           return t;
         }
         const row = el('div', `tx-item tx-user${it.k === 'cmd' ? ' tx-cmd' : ''}`);
-        const utext = el('span', 'tx-utext', it.text);
+        const utext = el('span', 'tx-utext');
+        // `[Image #N]` is Claude Code's placeholder for an image sent with
+        // the prompt: a small tag, the thumbnail itself is drawn underneath
+        for (const part of String(it.text).split(/(\[Image #\d+\])/)) {
+          if (!part) continue;
+          if (/^\[Image #\d+\]$/.test(part)) utext.append(el('span', 'tx-imgtag', part));
+          else utext.append(part);
+        }
         row.append(el('span', 'tx-caret', '>'), utext);
         const time = clock(it.at);
         if (time) row.append(el('span', 'tx-time', time));
@@ -341,6 +385,12 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
         const body = dotLine('tx-text');
         body.classList.add('tx-md');
         body.innerHTML = renderMarkdown(it.text);
+        if (live) {
+          // a reply is logged whole, so it cannot stream token by token: its
+          // paragraphs, lists and code blocks flow in one after another instead
+          body.classList.add('tx-reveal');
+          [...body.children].forEach((ch, i) => ch.style.setProperty('--i', String(Math.min(i, 14))));
+        }
         break;
       }
       case 'tool': {
@@ -408,6 +458,7 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   }
 
   return {
+    setLive(v) { live = Boolean(v); },
     add,
     reset() { list.replaceChildren(); tools.clear(); turn = null; },
     get turn() { return turn; },
@@ -454,13 +505,15 @@ const taskTone = (status) => (status === 'running' ? 'running'
  *        (`agentpanel.mjs`, driven by the page)
  * @param {(label: string) => boolean|null} [o.agentReachable]  is its row
  *        in that panel now (null: the screen cannot tell)
+ * @param {() => {lines: string[], cx: number, cy: number}} [o.screen]  the
+ *        TUI's screen (`readScreen`): image paste reads its `[Image #N]`
  */
 /** A prompt longer than this is sent as a paste, never as typed keys. */
 const PASTE_OVER = 200;
 
 export function createChatView({ send, bracketed = () => true, mac = false, keyFilter = null,
                                  onOpenTask = null, onCloseTask = null,
-                                 messageAgent = null, agentReachable = null }) {
+                                 messageAgent = null, agentReachable = null, screen = null }) {
   const root = el('div', 'cchat');
   const scroll = el('div', 'cchat-scroll');
   const head = el('div', 'tx-head');
@@ -509,7 +562,10 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
   tvMsg.hidden = true;
   tview.append(tvHead, tvList, tvPre, tvNote, tvMsg);
   const tvRender = createRenderer(tvList, { briefs: true });
-  scroll.append(head, list, empty, tview, status, strip, inputRow, tail);
+  // a one-off line under the prompt (image paste / removal), gone in seconds
+  const imgNote = el('div', 'cchat-imgnote', '');
+  imgNote.hidden = true;
+  scroll.append(head, list, empty, tview, status, strip, inputRow, imgNote, tail);
   // the `/` dropdown lies over the transcript, next to the prompt line
   const menu = el('div', 'cchat-menu');
   menu.hidden = true;
@@ -568,10 +624,12 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
       }
     }
     let snapTurn = null;   // a turn that just started: bring its prompt to the top
+    main.setLive(!frame.reset);
     for (const it of frame.items || []) {
       const t = main.add(it);
       if (t) snapTurn = t;
     }
+    main.setLive(false);
     paintTasks();
     empty.hidden = list.childElementCount > 0;
     sizeLast();
@@ -625,7 +683,7 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     if (!t) {
       // a message to an agent this view never saw start: nothing to update
       if (it.resumed) return;
-      t = { key, id: '', kind: '', label: '', status: 'running', start: null, end: null, out: '', summary: '' };
+      t = { key, id: '', kind: '', label: '', status: 'running', start: null, end: null, out: '', summary: '', peek: '' };
       tasks.set(key, t);
     }
     if (it.id) t.id = it.id;
@@ -663,12 +721,21 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
       chip.dataset.tone = taskTone(t.status);
       if (openTask?.key === t.key) chip.classList.add('open');
       const label = taskLabel(t);
+      // what it is doing NOW (`tpeek`), after a short dim name; the brief
+      // alone only until the first activity arrives
+      const text = el('span', 'cchat-task-label');
+      if (t.peek) {
+        const short = label.length > 24 ? `${label.slice(0, 24).trimEnd()}…` : label;
+        text.append(el('span', 'cchat-task-desc', short), el('span', 'cchat-task-sep', ' · '), t.peek);
+      } else {
+        text.textContent = label;
+      }
       chip.append(el('span', 'cchat-task-dot', '●'),
                   el('span', 'cchat-task-kind', t.kind === 'shell' ? '$' : '⧉'),
-                  el('span', 'cchat-task-label', label),
+                  text,
                   el('span', 'cchat-task-time', duration((t.end ?? now) - t.start)));
       const what = t.kind === 'shell' ? 'background shell' : 'background agent';
-      chip.title = `${label}\n${what} · ${t.status}${t.summary ? `\n${t.summary}` : ''}`
+      chip.title = `${label}${t.peek ? `\n${t.peek}` : ''}\n${what} · ${t.status}${t.summary ? `\n${t.summary}` : ''}`
         + (t.id ? '\nclick to view' : '\nnot started yet');
       chip.disabled = !t.id;
       // mousedown, not click: the input keeps the keyboard
@@ -802,6 +869,16 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     stick = true;
     toBottom();
     input.focus({ preventScroll: true });
+  }
+
+  /** A task's latest activity (`tpeek`): the row shows it from now on,
+   *  and keeps the last one once the task has finished. */
+  function takePeek(msg) {
+    const key = taskKey({ id: String(msg.id || '') });
+    const t = key && tasks.get(key);
+    if (!t || !msg.text || t.peek === msg.text) return;
+    t.peek = String(msg.text);
+    paintTasks();
   }
 
   /** A `ttx` frame: the open task's content. */
@@ -993,16 +1070,28 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
   }
-  input.addEventListener('input', () => { autosize(); updateMenu(); });
+  input.addEventListener('input', () => { autosize(); updateMenu(); checkImages(); });
 
   function submit() {
     // the page is walking Claude Code's panel: no key of ours in between
     if (agentBusy) return;
     if (agentOpen()) { submitToAgent(); return; }
-    const text = input.value;
+    // an image paste / removal still talking to the TUI: send after it
+    if (imgBusy) { imgChain.then(() => submit()); return; }
+    let text = input.value;
     input.value = '';
     autosize();
+    // the [Image #N] tokens are in the TUI's input already (Ctrl+V put them
+    // there): the prompt Claude Code sends is those tokens, then this text
+    const inTui = (screen && tuiImages(screen())) || [];
+    text = withoutTokens(text, images);
+    images = [];
+    if (inTui.length) text = text.replace(/^[ \t]+/, '');
     if (!text.trim()) { send('\r'); return; }
+    // typed after a token, Claude Code adds the space itself; a paste
+    // does not — one leading space covers both (measured, 2.1.286), unless
+    // the TUI's input already ends in one (a token was deleted after it)
+    if (inTui.length && !tuiEndsInSpace(inTui[inTui.length - 1])) text = ` ${text}`;
     // A multi-line message goes as one bracketed paste — a bare newline
     // would submit the first line on its own. Enter follows separately: in
     // the same chunk, Claude Code can take it for part of a paste.
@@ -1019,20 +1108,142 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     stick = true;
   }
 
-  // A pasted image (a screenshot): Claude Code attaches it by reading the
-  // clipboard itself on Ctrl+V, so the key goes to the TUI and it shows up
-  // there as [Image #N], joining whatever is typed here when it is sent.
+  // ── pasted images: Claude Code's own [Image #N] ────────────────────
+  // Claude Code attaches an image by reading the clipboard itself on Ctrl+V
+  // and puts `[Image #N]` in ITS input box; deleting that text there drops
+  // the image. So a paste here sends Ctrl+V, reads the token the TUI
+  // inserted, and puts the same token here; `images` is the TUI's input,
+  // which holds nothing else (what is typed here only reaches it on send).
+  // Measured on 2.1.286: Backspace right after a token deletes it whole, the
+  // space before it takes a Backspace of its own.
+  let images = [];
+  let imgBusy = false;
+  let imgChain = Promise.resolve();
+  let noteTimer = null;
+
+  function note(text) {
+    imgNote.textContent = text;
+    imgNote.hidden = false;
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => { imgNote.hidden = true; }, 4000);
+  }
+
+  /** one image step at a time, in order; submit waits for the chain */
+  function imgStep(fn) {
+    imgChain = imgChain.then(async () => {
+      imgBusy = true;
+      try { await fn(); } catch { /* the screen moved on: reconciled next time */ }
+      imgBusy = false;
+    });
+    return imgChain;
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const tuiNow = () => (screen ? tuiImages(screen()) : null);
+  const screenKey = () => { const s = screen(); return `${s.lines.join('\n')}|${s.cx},${s.cy}`; };
+  /** one key, then wait for the screen to change AND hold still (Ink can
+   *  draw a frame in pieces; a half-drawn one has the cursor elsewhere) */
+  async function key(bytes) {
+    const was = screenKey();
+    send(bytes);
+    if (!(await until(() => screenKey() !== was, 800))) return;
+    let last = screenKey();
+    await until(async () => {
+      await sleep(40);
+      const k = screenKey();
+      if (k === last) return true;
+      last = k;
+      return false;
+    }, 500);
+  }
+  async function until(pred, ms) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = await pred();
+      if (v) return v;
+      if (Date.now() > end) return null;
+      await sleep(30);
+    }
+  }
+
+  /** the TUI's cursor sits past the end of its last token: a space there
+   *  (the cell may look blank or not — Ink leaves stale cells; the cursor
+   *  is what counts) */
+  function tuiEndsInSpace(last) {
+    const s = screen();
+    const st = panelState(s);
+    if (st.prompt < 0 || s.cy !== st.prompt) return false;
+    const end = (s.lines[st.prompt] || '').lastIndexOf(last);
+    return end >= 0 && s.cx > end + last.length;
+  }
+
+  /** take tokens out of the input here, each with one space after it */
+  function stripTokens(toks) {
+    const v = withoutTokens(input.value, toks);
+    if (v !== input.value) { input.value = v; autosize(); }
+  }
+
+  /** the TUI is the truth: tokens gone from it leave the input here too */
+  function syncImages() {
+    const now = tuiNow();
+    if (now === null) return;
+    stripTokens(images.filter((t) => !now.includes(t)));
+    images = now;
+  }
+
   input.addEventListener('paste', (ev) => {
     const items = [...(ev.clipboardData?.items || [])];
     const hasImage = items.some((i) => i.kind === 'file' && i.type.startsWith('image/'));
     const hasText = items.some((i) => i.kind === 'string' && i.type === 'text/plain');
-    if (!hasImage || hasText || agentBusy) return;
+    if (!hasImage || hasText || agentBusy || agentOpen()) return;
     ev.preventDefault();
-    send('\x16');
-    const was = input.placeholder;
-    input.placeholder = 'Image attached — it goes with your next message…';
-    setTimeout(() => { if (input.placeholder.startsWith('Image attached')) input.placeholder = was; }, 5000);
+    if (!screen) { send('\x16'); return; }
+    imgStep(async () => {
+      const before = tuiNow();
+      if (before === null) { note('image paste failed'); return; }
+      send('\x16');
+      const tok = await until(() => (tuiNow() || []).find((t) => !before.includes(t)), 1500);
+      if (!tok) { note('image paste failed'); return; }
+      images = tuiNow() || [...before, tok];
+      // at the caret, set apart by spaces
+      const s = input.selectionStart ?? input.value.length;
+      const e = input.selectionEnd ?? s;
+      const pre = input.value.slice(0, s);
+      input.setRangeText(`${pre && !/\s$/.test(pre) ? ' ' : ''}${tok} `, s, e, 'end');
+      autosize();
+    });
   });
+
+  /** A token deleted here: delete it in the TUI too. Only the last one can
+   *  go on its own (the TUI's cursor is after the last token, and is never
+   *  moved); for an earlier one the later ones go with it. */
+  function checkImages() {
+    if (imgBusy || !images.length) return;
+    const gone = images.findIndex((t) => !input.value.includes(t));
+    if (gone < 0) return;
+    imgStep(() => dropFrom(gone));
+  }
+
+  async function dropFrom(i) {
+    const drop = images.slice(i);
+    for (const tok of [...drop].reverse()) {
+      for (let n = 0; n < 8; n += 1) {
+        const now = tuiNow();
+        if (now === null || !now.includes(tok)) break;
+        await key('\x7f');
+      }
+    }
+    const now = tuiNow() ?? [];
+    const stuck = drop.filter((t) => now.includes(t));
+    const later = drop.slice(1).filter((t) => input.value.includes(t));
+    images = now;
+    stripTokens(drop.filter((t) => !now.includes(t)));
+    if (stuck.length) {
+      note(`couldn't remove ${stuck[0].slice(1, -1).toLowerCase()} — clear it in the terminal view`);
+    } else if (later.length) {
+      note(`removed ${later[0].slice(1, -1).toLowerCase()}${later.length > 1 ? ' and later images' : ''} — paste ${later.length > 1 ? 'them' : 'it'} again`);
+    }
+  }
 
   input.addEventListener('keydown', (ev) => {
     if (keyFilter?.(ev)) return;
@@ -1053,6 +1264,8 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     if (bytes) {
       ev.preventDefault();
       send(bytes);
+      // Esc / Ctrl+C can clear the TUI's input, images and all
+      if (images.length) setTimeout(() => { if (!imgBusy) syncImages(); }, 400);
     }
   });
 
@@ -1066,6 +1279,7 @@ export function createChatView({ send, bracketed = () => true, mac = false, keyF
     root,
     take,
     takeTask,
+    takePeek,
     /** the open task view's task, to re-follow after a reconnect */
     currentTask: () => (openTask ? { kind: openTask.kind, id: openTask.id, out: openTask.out || undefined } : null),
     setRunning,
