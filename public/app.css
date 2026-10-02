@@ -158,6 +158,8 @@ body {
 .tx-user .tx-caret, .cchat-input .tx-caret { color: #9399b2; flex: 0 0 auto; }
 .tx-utext { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .tx-cmd .tx-utext { color: #cba6f7; }
+/* Claude Code's bash mode (`!`): its own pink, in the prompt line and the chat */
+.tx-bang .tx-utext, .tx-bang .tx-caret, .cchat-ta.bang, .tx-caret.bang { color: #fd5db1; }
 .tx-imgtag { color: #89b4fa; background: rgba(137,180,250,.12); border-radius: 3px; padding: 0 4px; font-size: .92em; }
 .cchat-imgnote { color: #f9e2af; font-size: .9em; padding: 2px 0 0 calc(1ch + 10px); }
 .cchat-imgnote[hidden] { display: none; }
@@ -349,6 +351,9 @@ body:not([data-view="chat"]) .screen { background: #0b1630; }
 html[data-shell="glass"] { background: transparent; }
 html[data-shell="glass"] body { background: rgba(6, 13, 38, .45); }
 html[data-shell="glass"] .head { background: rgba(0, 0, 0, .45); }
+/* nothing blurs behind the window (not KWin, not macOS): 90% opaque instead */
+html[data-shell="glass"][data-blur="off"] body { background: rgba(6, 13, 38, .9); }
+html[data-shell="glass"][data-blur="off"] .head { background: rgba(0, 0, 0, .9); }
 
 /* a Bash call with no description shows its command instead: one line,
    cut with an ellipsis, so a row reads like a description either way */
@@ -362,3 +367,44 @@ html[data-shell="glass"] .head { background: rgba(0, 0, 0, .45); }
 /* KWin blurs behind the whole window already: no second, in-page blur */
 html[data-shell="glass"] *, html[data-shell="glass"] *::before, html[data-shell="glass"] *::after {
   -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+
+/* how long each answer took (Claude Code's turn_duration), under it */
+.tx-took { color: #7f849c; font-size: .85em; }
+/* time worked this session, beside the context bar */
+.cchat-work { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+              color: #a6adc8; font-size: .78em; line-height: 1.95; padding-left: 8px;
+              cursor: default; user-select: none; white-space: nowrap; }
+.cchat-work[hidden] { display: none; }
+.cchat-work + .cchat-ctx { padding-left: 4px; }
+/* the prompts beside the scrollbar: a click jumps to one */
+.cchat-rail { position: absolute; width: 10px; pointer-events: none; z-index: 3; }
+.cchat-rail[hidden] { display: none; }
+.cchat-mark { position: absolute; left: 2px; width: 7px; height: 7px; margin: -3px 0 0; padding: 0;
+              border: 0; border-radius: 50%; background: #fab387; cursor: pointer;
+              pointer-events: auto; box-shadow: 0 0 0 1px rgba(0, 0, 0, .55); }
+.cchat-mark:hover { background: #ffd0a8; transform: scale(1.5); }
+/* the prompt cache: time left, then "expired" and what the next message re-sends */
+.cchat-cache { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+               color: #a6adc8; font-size: .78em; line-height: 1.95; padding-left: 8px;
+               cursor: default; user-select: none; white-space: nowrap; }
+.cchat-cache[hidden] { display: none; }
+.cchat-cache[data-level="warn"] .cchat-cache-text { color: #f9e2af; }
+.cchat-cache[data-level="cold"] .cchat-cache-text { color: #fab387; }
+.cchat-cache + .cchat-work { padding-left: 4px; }
+/* running background tasks, counted (`1 shell`) — opens the newest */
+.cchat-bg { flex: 0 0 auto; border: 1px solid #45475a; border-radius: 4px; background: transparent;
+            color: #a6e3a1; font: inherit; font-size: .78em; line-height: 1.6; padding: 0 7px;
+            margin-left: 8px; cursor: pointer; white-space: nowrap; }
+.cchat-bg[hidden] { display: none; }
+.cchat-bg:hover, .cchat-bg.open { background: #313244; }
+/* the `/` menu: a dark panel, not frosted glass — it sits over the chat text
+   and a bright desktop behind the window used to wash it out */
+.cchat-menu, html[data-shell="glass"] .cchat-menu {
+  background: rgba(9, 14, 30, .96); border-color: rgba(170, 205, 255, .12);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .55); }
+.cchat-menu .cchat-menu-name { color: #bac2de; }
+.cchat-menu .cchat-menu-desc { color: #6c7086; }
+.cchat-menu .cchat-menu-item:hover { background: rgba(137, 180, 250, .07); }
+.cchat-menu .cchat-menu-item.sel { background: rgba(137, 180, 250, .13); }
+.cchat-menu .cchat-menu-item.sel .cchat-menu-name { color: #cba6f7; }
+.cchat-menu .cchat-menu-item.sel .cchat-menu-desc { color: #9399b2; }

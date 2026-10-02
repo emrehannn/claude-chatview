@@ -37,3 +37,4 @@
    page draws; each tab's page tints itself */
 html[data-shell="glass"] body.tabs-host { background: transparent; }
 html[data-shell="glass"] .strip { background: rgba(0, 0, 0, .55); }
+html[data-shell="glass"][data-blur="off"] .strip { background: rgba(0, 0, 0, .9); }

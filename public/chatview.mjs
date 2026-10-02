@@ -45,7 +45,7 @@ const SPINNER = /^\S\s+\S.*…\s*\((?:\d+[hms]|esc|.*\btokens?\b)/;
  *             replace the input box (permission prompt, /config, /model,
  *             /resume, the trust dialog, AskUserQuestion…). False too while
  *             a background agent's transcript is open in the TUI (its row
- *             in the subagent panel carries the `⏺`): typing goes to that
+ *             in the subagent panel carries the filled dot): typing goes to that
  *             agent there, so the chat view must not look like main.
  *   menu    — the prompt is up AND a slash-command list sits above it (the
  *             input starts with `/`): transient while a command is typed.
@@ -108,6 +108,29 @@ export function tuiImages(scr) {
   }
   return [...rows.join('').replace(/\s+/g, '').matchAll(/\[Image#(\d+)\]/g)]
     .map((m) => `[Image #${m[1]}]`);
+}
+
+/**
+ * The text in the TUI's own input box, `[Image #N]` tokens left out; '' when
+ * it is empty, null when no prompt is on screen. Claude Code fills that box
+ * by itself — Esc puts queued messages back into it — and what is in it goes
+ * ahead of whatever is sent from here, so the chat view must show it.
+ * The empty box draws a dim placeholder (`❯ Try "…"`) with the cursor right
+ * after `❯ `, which is how it is told apart from text. Wrapped rows are
+ * `  `-indented and joined with one space.
+ */
+export function tuiDraft(scr) {
+  const st = panelState(scr);
+  if (st.prompt < 0 || !st.onMain) return null;
+  const rows = [];
+  for (let j = st.prompt; j < scr.lines.length; j += 1) {
+    if (j > st.prompt && RULE.test(scr.lines[j])) break;
+    rows.push(scr.lines[j].slice(2).trim());
+  }
+  // the cursor off the input (a footer pill, the panel): can't tell
+  if (scr.cy < st.prompt || scr.cy >= st.prompt + rows.length) return null;
+  if (scr.cy === st.prompt && scr.cx <= 2) return '';
+  return rows.filter(Boolean).join(' ').replace(/\s*\[Image #\d+\]\s*/g, ' ').trim();
 }
 
 // ── the `/` dropdown's list, shared by every chat ─────────────────────
@@ -225,7 +248,7 @@ function expandable(body, label, text, onLayout = () => {}) {
  * @param {boolean} [o.briefs]  a long prompt folds to one line (an agent's brief)
  */
 function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask = null,
-                               briefs = false } = {}) {
+                               onDone = () => {}, briefs = false } = {}) {
   /** tool_use id -> its element, so a result lands under its call */
   const tools = new Map();
   let turn = null;
@@ -234,6 +257,8 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   let bash = null;
   // items arriving live (not a first look / replay) ease in
   let live = false;
+  // when the prompt Claude is answering was sent (ms); null once it is done
+  let openAt = null;
 
   function newTurn() {
     bash = null;
@@ -326,7 +351,7 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   function add(it) {
     // anything Claude says or does between two Bash calls closes the block
     // (queue bookkeeping and task updates draw nothing here, so they never split a block)
-    if (!['result', 'turn', 'task', 'unqueue', 'queued'].includes(it.k) && !(it.k === 'tool' && it.name === 'Bash')) {
+    if (!['result', 'turn', 'task', 'unqueue', 'queued', 'cache'].includes(it.k) && !(it.k === 'tool' && it.name === 'Bash')) {
       bash = null;
     }
     switch (it.k) {
@@ -337,6 +362,8 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
           if (q.dataset.text === it.text) q.remove();
         }
         const t = newTurn();
+        const sent = it.at ? Date.parse(it.at) : NaN;
+        openAt = Number.isFinite(sent) ? sent : null;
         if (briefs && it.k === 'user' && it.text.length > 240) {
           // an agent's brief: one line, the rest on click
           const row = el('div', 'tx-item tx-user tx-brief');
@@ -347,7 +374,10 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
           t.append(row);
           return t;
         }
-        const row = el('div', `tx-item tx-user${it.k === 'cmd' ? ' tx-cmd' : ''}`);
+        // a `!` command (Claude Code's bash mode) arrived: its echo has done its job
+        const bang = it.k === 'user' && String(it.text).startsWith('! ');
+        if (bang) for (const q of list.querySelectorAll('.tx-pendbang')) q.remove();
+        const row = el('div', `tx-item tx-user${it.k === 'cmd' ? ' tx-cmd' : ''}${bang ? ' tx-bang' : ''}`);
         const utext = el('span', 'tx-utext');
         // `[Image #N]` is Claude Code's placeholder for an image sent with
         // the prompt: a small tag, the thumbnail itself is drawn underneath
@@ -356,8 +386,12 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
           if (/^\[Image #\d+\]$/.test(part)) utext.append(el('span', 'tx-imgtag', part));
           else utext.append(part);
         }
-        row.append(el('span', 'tx-caret', '>'), utext);
+        if (bang) utext.textContent = String(it.text).slice(2);
+        row.append(el('span', 'tx-caret', bang ? '!' : '>'), utext);
+        // for the scrollbar's prompt marks
+        t.dataset.prompt = String(it.text || (it.images?.length ? '[image]' : '')).slice(0, 160);
         const time = clock(it.at);
+        if (time) t.dataset.time = time;
         if (time) row.append(el('span', 'tx-time', time));
         t.append(row);
         if (it.images?.length) {
@@ -437,6 +471,7 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
         resultLine(respBox(), it.text, false);
         break;
       case 'interrupt':
+        openAt = null;
         resultLine(respBox(), 'Interrupted · What should Claude do instead?', true);
         break;
       case 'note':
@@ -446,6 +481,12 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
         // a finished turn: tools that never got a result were cut off
         for (const d of (turn || list).querySelectorAll('.tx-dot.pending')) {
           d.classList.remove('pending');
+        }
+        openAt = null;
+        if (it.ms > 0) {
+          // Claude Code's own `turn_duration`: how long this answer took
+          if (turn) respBox().append(el('div', 'tx-took', `✻ worked for ${duration(it.ms)}`));
+          onDone(it.ms);
         }
         break;
       case 'task':
@@ -460,8 +501,10 @@ function createRenderer(list, { onTurn = () => {}, onLayout = () => {}, onTask =
   return {
     setLive(v) { live = Boolean(v); },
     add,
-    reset() { list.replaceChildren(); tools.clear(); turn = null; },
+    reset() { list.replaceChildren(); tools.clear(); turn = null; openAt = null; },
     get turn() { return turn; },
+    /** when the prompt being answered was sent (ms), null if none is open */
+    get openAt() { return openAt; },
     /** a tool call's args line — a task chip's label when it has none */
     toolArgs: (id) => tools.get(id)?.dataset.args || '',
   };
@@ -482,6 +525,17 @@ function duration(ms) {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** 59m · <1m — a countdown, rounded up */
+function minutes(ms) {
+  const m = Math.ceil(ms / 60_000);
+  return m <= 1 ? '<1m' : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** 812 · 41k · 1.2M */
+function tokensShort(n) {
+  return n < 1000 ? String(n) : n < 999_500 ? `${Math.round(n / 1000)}k` : `${(n / 1e6).toFixed(1)}M`;
 }
 
 /** completed -> done; failed / killed / stopped -> failed */
@@ -541,7 +595,24 @@ export function createChatView({ send, submitText = null, bracketed = () => true
   const ctxPct = el('span', 'cchat-ctx-pct');
   ctx.append(el('span', 'cchat-ctx-label', 'ctx'), ctxBar, ctxPct);
   ctx.hidden = true;
-  inputRow.append(caret, input, ctx);
+  // time Claude has spent working this session: every finished turn's
+  // `turn_duration`, plus the one running now
+  const work = el('span', 'cchat-work');
+  const workTime = el('span', 'cchat-work-time');
+  work.append(el('span', 'cchat-ctx-label', 'work'), workTime);
+  work.hidden = true;
+  // the prompt cache: how long the last request's cache lives on, and once
+  // it has expired, how much the next message sends again uncached
+  const cache = el('span', 'cchat-cache');
+  const cacheText = el('span', 'cchat-cache-text');
+  cache.append(el('span', 'cchat-ctx-label', 'cache'), cacheText);
+  cache.hidden = true;
+  // the running background tasks, counted, as Claude Code's footer pill
+  // (`1 shell`): a click opens the newest one, a second click closes it
+  const bgPill = el('button', 'cchat-bg');
+  bgPill.type = 'button';
+  bgPill.hidden = true;
+  inputRow.append(caret, input, bgPill, cache, work, ctx);
   // background tasks: a strip of chips above the prompt line, and the task
   // view (one agent's transcript / one shell's output) in place of the chat
   const strip = el('div', 'cchat-tasks');
@@ -571,7 +642,10 @@ export function createChatView({ send, submitText = null, bracketed = () => true
   const menu = el('div', 'cchat-menu');
   menu.hidden = true;
   menu.setAttribute('role', 'listbox');
-  root.append(scroll, menu);
+  // the prompts, as orange marks beside the scrollbar: a click goes there
+  const rail = el('div', 'cchat-rail');
+  rail.hidden = true;
+  root.append(scroll, menu, rail);
   head.append(el('span', 'tx-star', '✻'), el('b', '', ' Claude Code'));
   const headProject = el('span', 'tx-dim', '');
   head.append(headProject);
@@ -585,10 +659,14 @@ export function createChatView({ send, submitText = null, bracketed = () => true
   scroll.addEventListener('scroll', () => { stick = inputVisible(); });
 
   /** The chat's own items. */
+  let workMs = 0;             // finished turns, summed
+  let runSince = null;        // the spinner came up (ms), while it is up
+  let runTimer = null;
   const main = createRenderer(list, {
     onTurn: () => sizeLast(),
     onLayout: () => sizeLast(),
     onTask: (it) => taskItem(it),
+    onDone: (ms) => { workMs += ms; paintWork(); },
   });
 
   /** The newest turn, the status line and the prompt line together fill at
@@ -610,14 +688,19 @@ export function createChatView({ send, submitText = null, bracketed = () => true
   }
 
   if (typeof ResizeObserver === 'function') {
-    const ro = new ResizeObserver(() => sizeLast());
+    const ro = new ResizeObserver(() => { sizeLast(); paintRail(); });
     ro.observe(scroll); ro.observe(list); ro.observe(inputRow);
   }
+
+  /** the last `! command` seen: a shell it was sent to the background as takes its name */
+  let lastBang = '';
 
   /** A frame of items from the server. */
   function take(frame) {
     if (frame.reset) {
       main.reset();
+      workMs = 0;
+      cacheAt = null;
       tasks.clear();
       stick = !openTask;
       if (frame.project !== undefined) {
@@ -627,6 +710,9 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     let snapTurn = null;   // a turn that just started: bring its prompt to the top
     main.setLive(!frame.reset);
     for (const it of frame.items || []) {
+      if (it.k === 'cache') { noteCache(it); continue; }
+      if (it.k === 'user') lastBang = String(it.text).startsWith('! ') ? String(it.text).slice(2) : '';
+      if (it.k === 'task' && it.bang && !it.label && lastBang) it.label = lastBang;
       const t = main.add(it);
       if (t) snapTurn = t;
     }
@@ -634,6 +720,9 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     paintTasks();
     empty.hidden = list.childElementCount > 0;
     sizeLast();
+    paintWork();
+    paintCache();
+    paintRail();
     // the task view is on screen: the chat fills in underneath, unscrolled
     if (openTask) return;
     if (frame.reset) { toBottom(); return; }
@@ -641,19 +730,52 @@ export function createChatView({ send, submitText = null, bracketed = () => true
       // the video's shape: a new prompt starts at the TOP of the pane and
       // the reply flows down under it (`tail` makes the room for it)
       const t = snapTurn;
-      requestAnimationFrame(() => {
-        scroll.scrollTop = t.offsetTop - 8;
-        stick = inputVisible();
-      });
+      requestAnimationFrame(() => glideTo(() => t.offsetTop - 8));
       return;
     }
     if (stick) toBottom();
+  }
+
+  /** Scroll smoothly to `target()` — re-read every frame, so items landing
+   *  meanwhile move the end point rather than the view. Eased out, longer
+   *  for a longer way but never slow; the wheel or a touch takes the
+   *  view back at once. Reduced motion = a plain jump. */
+  let glide = 0;
+  function glideTo(target) {
+    cancelAnimationFrame(glide);
+    const from = scroll.scrollTop;
+    const dist = () => target() - from;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches || Math.abs(dist()) < 2) {
+      scroll.scrollTop = target();
+      stick = inputVisible();
+      return;
+    }
+    const ms = Math.min(520, 260 + Math.abs(dist()) * 0.12);
+    const t0 = performance.now();
+    const stop = () => { cancelAnimationFrame(glide); glide = 0; off(); };
+    const off = () => {
+      for (const ev of ['wheel', 'touchstart']) scroll.removeEventListener(ev, stop);
+    };
+    for (const ev of ['wheel', 'touchstart']) {
+      scroll.addEventListener(ev, stop, { passive: true });
+    }
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / ms);
+      const e = 1 - (1 - p) ** 3;
+      scroll.scrollTop = from + dist() * e;
+      if (p < 1) { glide = requestAnimationFrame(step); return; }
+      glide = 0;
+      off();
+      stick = inputVisible();
+    };
+    glide = requestAnimationFrame(step);
   }
 
   /** Bring the prompt line into view by scrolling DOWN only — never into
    *  the blank room, never up out of it. */
   function toBottom() {
     requestAnimationFrame(() => {
+      if (glide) return;
       const over = inputRow.getBoundingClientRect().bottom + 12 - scroll.getBoundingClientRect().bottom;
       if (over > 0) scroll.scrollTop += over;
     });
@@ -747,12 +869,33 @@ export function createChatView({ send, submitText = null, bracketed = () => true
       });
       return chip;
     }));
+    paintBgPill(shown);
     // a clock while anything is on the strip: elapsed time, and lingering
     // chips leaving on time
     paintAgentInput();
     if (shown.length && !taskTimer) taskTimer = setInterval(paintTasks, 1000);
     else if (!shown.length && taskTimer) { clearInterval(taskTimer); taskTimer = null; }
   }
+
+  function paintBgPill(shown) {
+    const running = shown.filter((t) => t.status === 'running');
+    const shells = running.filter((t) => t.kind === 'shell').length;
+    const agents = running.length - shells;
+    const parts = [];
+    if (shells) parts.push(`${shells} shell${shells > 1 ? 's' : ''}`);
+    if (agents) parts.push(`${agents} agent${agents > 1 ? 's' : ''}`);
+    bgPill.hidden = parts.length === 0;
+    bgPill.textContent = parts.join(' · ');
+    bgPill.classList.toggle('open', Boolean(openTask));
+    bgPill.title = running.map((t) => `${t.kind === 'shell' ? '$' : '⧉'} ${taskLabel(t)}`).join('\n')
+      + '\nclick to view the newest';
+  }
+  bgPill.addEventListener('mousedown', (ev) => ev.preventDefault());
+  bgPill.addEventListener('click', () => {
+    if (openTask) { closeTaskView(); return; }
+    const running = visibleTasks().filter((t) => t.status === 'running' && t.id);
+    if (running.length) openTaskView(running[running.length - 1]);
+  });
 
   // ── messaging the open agent ───────────────────────────────────────
   // With an agent's view open, the prompt line sends to THAT agent —
@@ -839,6 +982,7 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     tview.hidden = false;
     head.hidden = true;
     list.hidden = true;
+    paintRail();
     empty.hidden = true;
     agentNotice('');
     input.placeholder = agentOpen() ? agentPlaceholder()
@@ -860,8 +1004,9 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     tvPre.textContent = '';
     head.hidden = false;
     list.hidden = false;
+    paintRail();
     empty.hidden = list.childElementCount > 0;
-    input.placeholder = PLACEHOLDER;
+    input.placeholder = mainPlaceholder();
     input.disabled = false;
     agentNotice('');
     onCloseTask?.();
@@ -917,10 +1062,145 @@ export function createChatView({ send, submitText = null, bracketed = () => true
   tvBack.addEventListener('mousedown', (ev) => ev.preventDefault());
   tvBack.addEventListener('click', () => closeTaskView());
 
-  function setRunning(on) {
-    status.textContent = on ? '✻ working…  esc to interrupt' : '';
-    status.classList.toggle('on', Boolean(on));
+  /** ms the current answer has run: from its prompt, or (a turn with no
+   *  prompt of its own, a page opened mid-turn without one) from the spinner */
+  function liveMs() {
+    if (runSince == null) return 0;
+    const from = main.openAt ?? runSince;
+    return Math.max(0, Date.now() - Math.min(from, runSince));
   }
+
+  function paintStatus() {
+    status.textContent = runSince != null
+      ? `✻ working… ${duration(liveMs())} · esc to interrupt` : '';
+    status.classList.toggle('on', runSince != null);
+  }
+
+  function paintWork() {
+    const total = workMs + liveMs();
+    work.hidden = total < 1000;
+    workTime.textContent = duration(total);
+    work.title = `Claude has worked ${duration(total)} in this session `
+      + `(every answer's time, summed${runSince != null ? ', this one still running' : ''})`;
+  }
+
+  function setRunning(on) {
+    if (on && runSince == null) {
+      runSince = Date.now();
+      runTimer = setInterval(() => { paintStatus(); paintWork(); }, 1000);
+    } else if (!on && runSince != null) {
+      // the finished turn's `turn_duration` lands in the total right after
+      runSince = null;
+      clearInterval(runTimer);
+      runTimer = null;
+    }
+    paintStatus();
+    paintWork();
+    paintCache();
+  }
+
+  // ── the prompt marks beside the scrollbar ───────────────────────────
+
+  let railFrame = 0;
+  function paintRail() {
+    if (railFrame) return;
+    railFrame = requestAnimationFrame(() => { railFrame = 0; drawRail(); });
+  }
+
+  function drawRail() {
+    const sh = scroll.scrollHeight;
+    const ch = scroll.clientHeight;
+    const turns = [...list.children].filter((t) => t.dataset?.prompt !== undefined);
+    if (openTask || root.hidden || !ch || sh <= ch + 1 || !turns.length) {
+      rail.hidden = true;
+      return;
+    }
+    rail.hidden = false;
+    rail.style.top = `${scroll.offsetTop}px`;
+    rail.style.height = `${ch}px`;
+    // just left of the scrollbar (an overlay scrollbar has no width: the edge)
+    rail.style.right = `${scroll.offsetWidth - scroll.clientWidth}px`;
+    const top0 = scroll.getBoundingClientRect().top - scroll.scrollTop;
+    const marks = turns.map((t) => {
+      const y = t.getBoundingClientRect().top - top0;
+      const m = el('button', 'cchat-mark');
+      m.type = 'button';
+      m.tabIndex = -1;
+      m.style.top = `${Math.round((y / sh) * ch)}px`;
+      m.title = `${t.dataset.time ? `${t.dataset.time}  ` : ''}> ${t.dataset.prompt}`;
+      m.addEventListener('mousedown', (ev) => ev.preventDefault());
+      m.addEventListener('click', () => {
+        scroll.scrollTo({ top: Math.max(0, y - 8), behavior: 'smooth' });
+      });
+      return m;
+    });
+    rail.replaceChildren(...marks);
+  }
+
+  // ── the prompt cache ─────────────────────────────────────────────────
+
+  let cacheReq = null;        // the newest request seen
+  let cacheAt = null;         // ... when its first record was written (ms)
+  let cacheTokens = 0;        // ... the whole prompt it sent
+  let cacheTtl = null;        // the newest TTL a request stated (ms)
+
+  /** A request's `cache` item: the cache was read or written right then,
+   *  which starts its TTL over. */
+  function noteCache(it) {
+    if (it.ttl > 0) cacheTtl = it.ttl;
+    if (it.tokens > 0) cacheTokens = it.tokens;
+    if (it.req !== cacheReq || cacheAt == null) {
+      cacheReq = it.req;
+      const at = Date.parse(it.at);
+      cacheAt = Number.isFinite(at) ? at : Date.now();
+    }
+  }
+
+  /** ms the cache has left (<= 0: expired); null with nothing to go on.
+   *  A turn running now keeps it warm with every request. */
+  function cacheLeft() {
+    if (cacheAt == null || !cacheTokens) return null;
+    if (runSince != null) return cacheTtl || 300_000;
+    return cacheAt + (cacheTtl || 300_000) - Date.now();
+  }
+
+  function mainPlaceholder() {
+    const left = cacheLeft();
+    return left != null && left <= 0
+      ? `${PLACEHOLDER}   (cache expired — this re-sends ${tokensShort(cacheTokens)} tokens)`
+      : PLACEHOLDER;
+  }
+
+  function paintCache() {
+    const left = cacheLeft();
+    cache.hidden = left == null;
+    if (left == null) return;
+    const ttl = cacheTtl || 300_000;
+    const ttlName = cacheTtl ? (ttl >= 3600_000 ? '1 h' : '5 min') : '5 min assumed';
+    const tok = tokensShort(cacheTokens);
+    // a cache write costs 2x (1 h) or 1.25x (5 min) the input price, a read 0.1x
+    const ratio = ttl >= 3600_000 ? 20 : 12.5;
+    if (left <= 0) {
+      cache.dataset.level = 'cold';
+      cacheText.textContent = `expired · ${tok}`;
+      cache.title = `Prompt cache expired ${duration(-left)} ago (${ttlName} TTL). `
+        + `Your next message sends the whole ${cacheTokens.toLocaleString()}-token context `
+        + `again uncached: slower to start, and about ${ratio}× what a warm cache would cost.`;
+    } else {
+      cache.dataset.level = left < Math.min(ttl / 6, 600_000) ? 'warn' : 'ok';
+      cacheText.textContent = runSince != null ? `warm · ${tok}` : `${minutes(left)} · ${tok}`;
+      cache.title = runSince != null
+        ? `Prompt cache warm: Claude is working (${ttlName} TTL, ${cacheTokens.toLocaleString()} tokens).`
+        : `Prompt cache warm for about ${minutes(left)} more (${ttlName} TTL, from Claude Code's `
+          + `last request ${duration(Date.now() - cacheAt)} ago). Send before then and the `
+          + `${cacheTokens.toLocaleString()}-token context is read from the cache; after, it is sent again in full.`;
+    }
+    // the hint in an empty input, only where the plain one would be
+    if (!openTask && (input.placeholder === PLACEHOLDER || input.placeholder.startsWith(`${PLACEHOLDER} `))) {
+      input.placeholder = mainPlaceholder();
+    }
+  }
+  setInterval(paintCache, 10_000);
 
   /** `{used, left}` percentages from the server's `ctx` frame; nothing
    *  arrived = nothing shown (a window size is never guessed). */
@@ -1067,7 +1347,16 @@ export function createChatView({ send, submitText = null, bracketed = () => true
 
   // ── input: keystrokes into the real TUI ─────────────────────────────
 
+  /** Claude Code's bash mode: a leading `!` turns the line pink and the caret into `!` */
+  function paintBang() {
+    const on = !agentOpen() && input.value.startsWith('!');
+    input.classList.toggle('bang', on);
+    caret.textContent = on ? '!' : '>';
+    caret.classList.toggle('bang', on);
+  }
+
   function autosize() {
+    paintBang();
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
   }
@@ -1079,7 +1368,27 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     if (agentOpen()) { submitToAgent(); return; }
     // an image paste / removal still talking to the TUI: send after it
     if (imgBusy) { imgChain.then(() => submit()); return; }
-    let text = input.value;
+    // the TUI's own text (`adopted`) was edited here: empty its box first,
+    // then all of this goes as typed
+    if (adopted && !input.value.startsWith(adopted)) {
+      imgStep(clearTuiDraft).then(() => { if (!adopted) submit(); });
+      return;
+    }
+    // a `!` command reaches the transcript only once it ends or goes to the
+    // background: shown here as running until then
+    if (input.value.startsWith('!') && input.value.slice(1).trim()) {
+      const row = el('div', 'tx-item tx-user tx-queued tx-bang tx-pendbang');
+      row.append(el('span', 'tx-caret', '!'), el('span', 'tx-utext', input.value.slice(1).trim()),
+                 el('span', 'tx-dim', '  running…'));
+      list.append(row);
+      empty.hidden = true;
+      stick = true;
+    }
+    // what the TUI holds already is not sent again, only what follows it
+    const prefix = adopted;
+    let text = input.value.slice(prefix.length);
+    adopted = '';
+    holdDraftUntil = Date.now() + DRAFT_HOLD_MS;
     input.value = '';
     autosize();
     // the [Image #N] tokens are in the TUI's input already (Ctrl+V put them
@@ -1087,12 +1396,12 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     const inTui = (screen && tuiImages(screen())) || [];
     text = withoutTokens(text, images);
     images = [];
-    if (inTui.length) text = text.replace(/^[ \t]+/, '');
+    if (inTui.length && !prefix) text = text.replace(/^[ \t]+/, '');
     if (!text.trim()) { send('\r'); return; }
     // typed after a token, Claude Code adds the space itself; a paste
     // does not — one leading space covers both (measured, 2.1.286), unless
     // the TUI's input already ends in one (a token was deleted after it)
-    if (inTui.length && !tuiEndsInSpace(inTui[inTui.length - 1])) text = ` ${text}`;
+    if (inTui.length && !prefix && !tuiEndsInSpace(inTui[inTui.length - 1])) text = ` ${text}`;
     // A multi-line message goes as one bracketed paste — a bare newline
     // would submit the first line on its own. Enter follows separately: in
     // the same chunk, Claude Code can take it for part of a paste.
@@ -1179,6 +1488,45 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     if (st.prompt < 0 || s.cy !== st.prompt) return false;
     const end = (s.lines[st.prompt] || '').lastIndexOf(last);
     return end >= 0 && s.cx > end + last.length;
+  }
+
+  // ── the TUI's own input text, shown here ───────────────────────────
+  // What is typed here reaches the TUI only on send, so its input box is
+  // normally empty. When Claude Code fills it by itself (Esc puts queued
+  // messages back; an Enter that never landed leaves the text), that text
+  // would silently go in front of the next message. It is put at the start
+  // of the box here instead (`adopted`): sent untouched, only what follows
+  // it is typed; edited, the TUI's box is emptied and the whole thing typed.
+  let adopted = '';
+  let holdDraftUntil = 0;
+  /** after a send, the TUI shows the sent text until its Enter lands */
+  const DRAFT_HOLD_MS = 4000;
+
+  function syncDraft() {
+    if (!screen || agentBusy || imgBusy || agentOpen() || Date.now() < holdDraftUntil) return;
+    const d = tuiDraft(screen());
+    if (d === null || d === adopted) return;
+    if (!d) { adopted = ''; return; }   // sent, or emptied in the terminal view
+    const own = adopted && input.value.startsWith(adopted)
+      ? input.value.slice(adopted.length) : input.value;
+    input.value = own.trim() ? `${d} ${own.replace(/^\s+/, '')}` : d;
+    adopted = d;
+    autosize();
+    if (document.activeElement === input) input.setSelectionRange(input.value.length, input.value.length);
+    note('Claude Code had this text in its input — it is in the box now');
+  }
+
+  /** empty the TUI's input box (End, kill-line, Backspace to join rows) */
+  async function clearTuiDraft() {
+    for (let n = 0; n < 24; n += 1) {
+      const d = tuiDraft(screen());
+      if (d === null) break;
+      if (!d) { adopted = ''; return; }
+      await key('\x05');
+      await key('\x15');
+      if (tuiDraft(screen())) await key('\x7f');
+    }
+    note("couldn't clear Claude Code's input — clear it in the terminal view");
   }
 
   /** take tokens out of the input here, each with one space after it */
@@ -1268,6 +1616,9 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     if (bytes) {
       ev.preventDefault();
       send(bytes);
+      if (ev.key === 'Escape') {
+        note(runSince != null ? 'Esc — interrupting Claude' : 'Esc — Claude is not working, nothing to interrupt');
+      }
       // Esc / Ctrl+C can clear the TUI's input, images and all
       if (images.length) setTimeout(() => { if (!imgBusy) syncImages(); }, 400);
     }
@@ -1288,6 +1639,8 @@ export function createChatView({ send, submitText = null, bracketed = () => true
     currentTask: () => (openTask ? { kind: openTask.kind, id: openTask.id, out: openTask.out || undefined } : null),
     setRunning,
     setContext,
+    /** the screen changed: show text the TUI put in its own input box */
+    syncDraft,
     focus: () => input.focus({ preventScroll: true }),
     /** the person has a half-written message here */
     hasDraft: () => input.value.trim().length > 0,

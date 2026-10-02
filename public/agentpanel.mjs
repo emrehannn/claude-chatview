@@ -22,7 +22,8 @@
  *                             the prompt now sends to the open agent
  *   Enter on the `main` row   the main conversation again
  *
- * The row on screen carries `⏺`, the others `◯`. The panel is only there
+ * The row on screen carries a filled dot (`⏺`; `●` as of Claude Code
+ * 2.1.287), the others the hollow `◯`. The panel is only there
  * while something runs in the background: once an agent has finished and
  * nothing else runs, its row is gone (the footer says `/tasks to see
  * subagents`) and it cannot be reached this way. `←` on the empty prompt is
@@ -47,6 +48,8 @@ const ENTER = '\r';
 const RULE = /^─{2,}(?:\s(.+?)\s─+)?\s*$/;
 /** a panel row: selection mark, a glyph, the rest */
 const ROW = /^(❯| ) (\S) +(.*?)\s*$/;
+/** the glyph of a row that is NOT on screen; any other glyph (`⏺`, `●`) is */
+const HOLLOW = '◯';
 
 export const UNREACHABLE = 'Couldn\'t reach this agent from here — its row is no longer in Claude Code\'s panel.';
 
@@ -70,7 +73,7 @@ export function readScreen(term) {
  *           session sent to the background comes back named), so it is
  *           never read alone
  *   onMain  the main conversation is on screen: its panel row carries the
- *           `⏺` (the row on screen does; the others `◯`), or no panel at all
+ *           filled dot (the row on screen does; the others `◯`), or no panel at all
  *   focus   'prompt' (cursor on the input line), 'panel' (a row is selected),
  *           'other' (a footer pill, or unknown)
  *   empty   the input is empty (cursor right after `❯ ` on a one-line input)
@@ -106,7 +109,7 @@ export function panelState({ lines, cx, cy }) {
       const main = m[3] === 'main';
       // `general-purpose  sleepy waiter      8s · ↓ 27.0k tokens`
       const parts = m[3].split(/\s{2,}/);
-      rows.push({ sel: m[1] === '❯', main, shown: m[2] === '⏺',
+      rows.push({ sel: m[1] === '❯', main, shown: m[2] !== HOLLOW,
                   type: main ? '' : parts[0] || '', desc: main ? 'main' : parts[1] || '' });
     }
   }
@@ -169,7 +172,7 @@ export async function messageAgent(io, { label, text, bracketed = true }) {
     }
   }
   const selIndex = (st) => st.rows.findIndex((r) => r.sel);
-  /** this agent's transcript is on screen: its row has the `⏺` and the
+  /** this agent's transcript is on screen: its row has the filled dot and the
    *  rule above the prompt names it (maybe truncated either way) */
   const open = (s) => !s.onMain && Boolean(findAgentRow(s, label)?.shown)
     && s.label !== null && (descMatches(s.label, label) || descMatches(label, s.label));

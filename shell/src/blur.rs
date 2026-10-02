@@ -118,6 +118,23 @@ fn attach(window: &gtk::ApplicationWindow) -> Result<Blur, String> {
     }
 }
 
+/// Whether the window will get a blur at all: GTK will be on Wayland and the
+/// compositor offers one of the two protocols. Asked on a connection of its
+/// own before the window exists, so the page can be told in its user agent
+/// (no blur = a near-opaque page instead of a see-through one).
+pub fn available() -> bool {
+    let backend = std::env::var("GDK_BACKEND").unwrap_or_default();
+    if !backend.is_empty() && !backend.trim_start().starts_with("wayland") {
+        return false;
+    }
+    let Ok(conn) = Connection::connect_to_env() else { return false };
+    let Ok((globals, _queue)) = registry_queue_init::<State>(&conn) else { return false };
+    globals.contents().with_list(|list| list.iter().any(|g| {
+        g.interface == ExtBackgroundEffectManagerV1::interface().name
+            || g.interface == OrgKdeKwinBlurManager::interface().name
+    }))
+}
+
 /// Ask KWin to blur behind `window`'s content, now and on every resize.
 pub fn enable(window: gtk::ApplicationWindow) {
     let start = move |w: &gtk::ApplicationWindow| -> bool {

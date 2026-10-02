@@ -110,20 +110,38 @@ case ":$PATH:" in
   *) say "note: $BIN_DIR is not on your PATH — add it in your shell's rc file." ;;
 esac
 
-# ── the window (Linux): shell/, a transparent, blurred WebKitGTK window ─
-# Built with cargo; without cargo (or on macOS) the page opens in a Chromium
-# app window instead, as before.
+# ── the window: shell/, a transparent window with the desktop blurred behind
+# (WebKitGTK on Linux, WKWebView on macOS). Built with cargo; without cargo
+# the page opens in a Chromium app window instead, as before.
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
-if [ "$(uname -s)" = Linux ]; then
+OS="$(uname -s)"
+if [ "$OS" = Linux ] || [ "$OS" = Darwin ]; then
   echo
   if ! command -v cargo >/dev/null 2>&1; then
     say "cargo not found — skipping the transparent window (the page opens in Chromium)."
-    say "  to get it: sudo pacman -S rust   (or https://rustup.rs), then ./install.sh again"
-  elif ask "Build the transparent window (Rust, WebKitGTK; a few minutes the first time)?"; then
+    if [ "$OS" = Darwin ]; then
+      say "  to get it: https://rustup.rs (or brew install rust), then ./install.sh again"
+    else
+      say "  to get it: sudo pacman -S rust   (or https://rustup.rs), then ./install.sh again"
+    fi
+  elif ask "Build the transparent window (Rust + Tauri; a few minutes the first time)?"; then
     say "building shell/ (cargo build --release) ..."
+    built=0
     if ( cd "$ROOT/shell" && cargo build --release ); then
+      built=1
       ln -sfn "$ROOT/shell/target/release/claude-chatview-shell" "$BIN_DIR/claude-chatview-shell"
+    fi
+    if [ "$built" = 0 ]; then
+      say "the build failed — the page opens in Chromium until it builds."
+      if [ "$OS" = Darwin ]; then
+        say "  needs the Xcode command line tools: xcode-select --install"
+      else
+        say "  WebKitGTK headers: sudo pacman -S --needed webkit2gtk-4.1   (Debian/Ubuntu: libwebkit2gtk-4.1-dev)"
+      fi
+    elif [ "$OS" = Darwin ]; then
+      say "window built; linked claude-chatview-shell into $BIN_DIR"
+    else
       mkdir -p "$APPS_DIR" "$ICONS_DIR/256x256/apps" "$ICONS_DIR/scalable/apps"
       cp "$ROOT/shell/icons/icon.png" "$ICONS_DIR/256x256/apps/claude-chatview.png"
       cp "$ROOT/shell/icons/icon.svg" "$ICONS_DIR/scalable/apps/claude-chatview.svg"
@@ -141,9 +159,6 @@ DESKTOP
       command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" 2>/dev/null || true
       command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
       say "window built; linked claude-chatview-shell into $BIN_DIR, icon and app entry installed"
-    else
-      say "the build failed — the page opens in Chromium until it builds. WebKitGTK headers:"
-      say "  sudo pacman -S --needed webkit2gtk-4.1   (Debian/Ubuntu: libwebkit2gtk-4.1-dev)"
     fi
   else
     say "skipped — the page opens in Chromium."

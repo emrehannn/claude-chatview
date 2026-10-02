@@ -25,6 +25,15 @@ const FONT_KEY = 'claude-chatview.fontSize';
 /** A non-prompt screen must hold this long before the terminal is shown —
  *  a command's picker flashes for a frame between its name and its Enter. */
 const FALLBACK_MS = 250;
+/** A fallback held this long asks Claude Code for one full repaint: a screen
+ *  the emulator got out of step with (dropped output, a replay begun
+ *  mid-frame) only ever gets patched, never redrawn, and its prompt is not
+ *  found again. A real dialog repaints the same, harmlessly. */
+const STUCK_MS = 2000;
+/** After that repaint, how long until the screen is logged again. */
+const AFTER_REDRAW_MS = 1500;
+/** A dialog this matches is a real one: no repaint asked for. */
+const KNOWN_DIALOG = /(?:^|\s)❯\s+\d+\.\s|\bEsc to (?:cancel|exit|go back)\b|\bEnter to (?:confirm|select)\b/;
 const SCROLLBACK_LINES = 5000;
 const RETRY_MAX_MS = 2000;
 const OUTBOX_MAX = 256;
@@ -134,6 +143,8 @@ function macKeyBytes(ev) {
 let viewPref = store.get(VIEW_KEY) === 'term' ? 'term' : 'chat';
 let fontSize = Number(store.get(FONT_KEY)) || FONT_DEFAULT;
 let tui = false;              // the terminal is showing a dialog
+let dismissed = false;        // Ctrl+` over that fallback: the chat view anyway
+let stuckTimer = null;
 let oddSince = null;
 let checkTimer = null;
 let driving = false;          // walking Claude Code's subagent panel for the task view
@@ -143,7 +154,8 @@ let cols = 0;
 let rows = 0;
 let ptySize = null;           // the pty's size as the server last said
 let lastRunning = null;
-let serverSubmits = false;    // the server takes {t:'submit'} (its hello says so)       // last "Claude is working" told to the tab strip
+let serverSubmits = false;    // the server takes {t:'submit'} (its hello says so)
+let serverRedraws = false;    // ... and {t:'redraw'} / {t:'diag'}       // last "Claude is working" told to the tab strip
 
 document.documentElement.style.setProperty('--cfont', `${fontSize}px`);
 
@@ -260,16 +272,19 @@ window.addEventListener('keydown', (ev) => {
 
 // ── the two views ─────────────────────────────────────────────────────
 
-const mode = () => (viewPref === 'term' || tui ? 'term' : 'chat');
+const mode = () => (viewPref === 'term' || (tui && !dismissed) ? 'term' : 'chat');
 
 function paintViewBtn() {
   const fallback = viewPref === 'chat' && tui;
-  els.view.textContent = viewPref === 'chat' ? (fallback ? 'terminal ·' : 'chat') : 'terminal';
+  els.view.textContent = viewPref === 'chat'
+    ? (fallback ? (dismissed ? 'chat · terminal?' : 'terminal ·') : 'chat') : 'terminal';
   els.view.classList.toggle('fallback', fallback);
-  els.view.title = (fallback
-    ? 'Claude Code is showing a prompt or menu the chat view does not draw — answer it here; the chat view comes back by itself'
-    : viewPref === 'chat' ? 'Chat view — click for Claude Code\'s own terminal'
-      : 'Claude Code\'s terminal — click for the chat view') + '  (Ctrl+`)';
+  els.view.title = (fallback && dismissed
+    ? 'Claude Code\'s screen is not showing its prompt — it may be waiting for an answer there'
+    : fallback
+      ? 'Claude Code is showing a prompt or menu the chat view does not draw — answer it here; the chat view comes back by itself'
+      : viewPref === 'chat' ? 'Chat view — click for Claude Code\'s own terminal'
+        : 'Claude Code\'s terminal — click for the chat view') + '  (Ctrl+`)';
 }
 
 function applyView({ focus = false } = {}) {
@@ -287,9 +302,55 @@ function applyView({ focus = false } = {}) {
 }
 
 function toggleView() {
+  // the automatic switch is up: the key overrides it (and back), rather than
+  // flipping the remembered default underneath where it cannot be seen
+  if (viewPref === 'chat' && tui) {
+    dismissed = !dismissed;
+    if (dismissed) requestRedraw();
+    applyView({ focus: true });
+    return;
+  }
   viewPref = viewPref === 'chat' ? 'term' : 'chat';
   store.set(VIEW_KEY, viewPref);
+  // asking for chat while a fallback is up is the same override
+  dismissed = viewPref === 'chat' && tui;
   applyView({ focus: true });
+}
+
+/** One full repaint from Claude Code (the server nudges the pty's size). */
+function requestRedraw() {
+  if (serverRedraws && !ended) wsSend({ t: 'redraw' });
+}
+
+/** The screen as it stood, to the server's log: what the prompt detector
+ *  saw when it gave up on it. */
+function logScreen(why) {
+  if (!serverRedraws) return;
+  const scr = readScreen(term);
+  wsSend({ t: 'diag', why, cols, rows, ptySize, cx: scr.cx, cy: scr.cy,
+           lines: scr.lines.map((l) => l.slice(0, 400)) });
+}
+
+function clearStuck() {
+  if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null; }
+}
+
+/** The fallback has just come up: log it, and if it holds with nothing on
+ *  screen that reads as a real dialog, ask for one repaint and log again. */
+function onFallback() {
+  clearStuck();
+  logScreen('fallback');
+  stuckTimer = setTimeout(() => {
+    stuckTimer = null;
+    if (!tui || ended) return;
+    const known = readScreen(term).lines.some((l) => KNOWN_DIALOG.test(l));
+    if (known) return;
+    requestRedraw();
+    stuckTimer = setTimeout(() => {
+      stuckTimer = null;
+      if (tui && !ended) logScreen('still after redraw');
+    }, AFTER_REDRAW_MS);
+  }, STUCK_MS);
 }
 els.view.addEventListener('click', () => toggleView());
 
@@ -306,6 +367,7 @@ function checkScreen() {
   // walking the subagent panel for the chat view: the agent's transcript
   // is on the TUI for a moment, and the task view stays where it is
   if (driving) return;
+  if (st.normal) view.syncDraft();
   let next = tui;
   if (st.normal || st.blank) {
     oddSince = null;
@@ -320,6 +382,8 @@ function checkScreen() {
   if (ended) return;
   if (next !== tui) {
     tui = next;
+    if (tui) onFallback();
+    else { dismissed = false; clearStuck(); }
     applyView();
   }
 }
@@ -463,6 +527,7 @@ function onFrame(msg) {
   switch (msg.t) {
     case 'hello':
       serverSubmits = msg.submit === true;
+      serverRedraws = msg.redraw === true;
       els.project.textContent = msg.cwdShown || msg.cwd || '';
       els.project.title = `claude ${(msg.argv || []).join(' ')}`;
       document.title = `Claude Code · ${msg.project || ''}`;

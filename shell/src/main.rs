@@ -10,8 +10,10 @@
 //! WebKitGTK window. Closing the window ends the sessions the same way a
 //! closed browser window does: the server sees its sockets drop.
 //!
-//! On KDE Plasma (Wayland) the window also asks KWin to blur what is behind
-//! it (`blur.rs`); `CLAUDE_CHATVIEW_BLUR=off` leaves it a clear tint. The
+//! Behind it the desktop is blurred: by KWin on KDE Plasma (`blur.rs`), by
+//! macOS's own vibrancy on a Mac. Where no blur can be had (another Linux
+//! compositor, X11) the page is told so through its user agent and draws
+//! itself nearly opaque instead. `CLAUDE_CHATVIEW_BLUR=off` = a clear tint. The
 //! see-through part is per pixel — the page's background alpha — never a
 //! window opacity, so text and every other opaque pixel stay fully opaque.
 
@@ -31,9 +33,20 @@ fn blur_wanted() -> bool {
     !matches!(v.as_str(), "off" | "0" | "no" | "false")
 }
 
-/// What the page looks for to switch to its see-through look (`glass.mjs`).
+/// What the page looks for to switch to its see-through look (`public/shell.js`);
+/// ` NoBlur` after it = nothing blurs behind the window.
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 \
                   (KHTML, like Gecko) Version/18.0 Safari/605.1.15 ClaudeChatviewShell/1";
+
+/// Whether something will blur behind the window (asked before it exists).
+fn blur_available() -> bool {
+    #[cfg(target_os = "linux")]
+    return blur::available();
+    #[cfg(target_os = "macos")]
+    return true;
+    #[allow(unreachable_code)]
+    false
+}
 /// Consecutive failed connects before the server counts as gone.
 const GONE_AFTER: u32 = 2;
 
@@ -54,14 +67,32 @@ fn main() {
         .ok()
         .and_then(|a| a.into_iter().next());
 
+    // blur deliberately off is a clear tint, as asked; blur that cannot be had
+    // is a near-opaque page, so text never sits on a sharp desktop
+    let ua = if blur_wanted() && !blur_available() {
+        eprintln!("claude-chatview-shell: nothing can blur behind the window here; drawing it nearly opaque");
+        format!("{UA} NoBlur")
+    } else {
+        UA.to_string()
+    };
+
     tauri::Builder::default()
         .setup(move |app| {
-            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.clone()))
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.clone()))
                 .title("Claude Code")
                 .inner_size(1100.0, 900.0)
                 .transparent(true)
-                .user_agent(UA)
-                .build()?;
+                .user_agent(&ua);
+            // macOS: the system's own blur behind the window, dark to match the page
+            #[cfg(target_os = "macos")]
+            let builder = if blur_wanted() {
+                use tauri::window::{Effect, EffectState, EffectsBuilder};
+                builder.effects(EffectsBuilder::new().effect(Effect::HudWindow)
+                    .state(EffectState::Active).build())
+            } else {
+                builder
+            };
+            let window = builder.build()?;
             #[cfg(target_os = "linux")]
             if blur_wanted() {
                 match window.gtk_window() {

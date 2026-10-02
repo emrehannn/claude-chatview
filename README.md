@@ -62,10 +62,26 @@ commands, `Esc` to interrupt, `Shift+Tab` modes, `!` shell commands, subagents,
   view and Claude Code's own screen — same session, nothing restarted. Any
   dialog the chat view does not draw (a permission prompt, `/config`, `/model`,
   a picker, the trust dialog) switches to the real terminal automatically, and
-  back once the prompt returns.
+  back once the prompt returns. If the terminal's screen gets out of step and
+  the prompt is not found again, the window asks Claude Code for a full
+  repaint after 2 s; `` Ctrl+` `` always gets you back to the chat
+  (`chat · terminal?` in the header means Claude Code may still want an
+  answer there). Each such switch logs the screen to
+  `~/.local/state/claude-chatview/fallback.log`.
 
   <img src="docs/images/terminal.png" alt="The same session side by side: the chat view, and Claude Code's own terminal screen" width="100%">
 
+- **Timers.** Each answer ends with `✻ worked for 3m 28s` (Claude Code's own
+  turn time), the status line counts up while Claude works, and `work` beside
+  the context bar is the session's total.
+- **Prompt cache.** `cache 42m · 216k` beside the context bar: how long the
+  prompt cache from Claude Code's last request lives on (its TTL — 1 h or
+  5 min — read from the transcript, never guessed), and how big the context
+  is. Once it runs out it reads `expired · 216k` and the empty input says so:
+  your next message sends all of that again uncached, slower to start and
+  about 12–20× the cost of a warm read. Hover for the details.
+- **Prompt marks.** Your prompts are orange dots beside the scrollbar; click
+  one to jump to it.
 - Agent briefs and messages from agents fold to one line; click to expand.
 - `AskUserQuestion` shows its question; click for the options, and the answer
   reads `answered: <choice>`.
@@ -101,6 +117,7 @@ cd ~/claude-chatview
 
 ```sh
 xcode-select --install          # only if you have no command line tools yet
+brew install rust               # optional: the see-through, blurred window
 git clone https://github.com/emrehannn/claude-chatview ~/claude-chatview
 cd ~/claude-chatview
 ./install.sh
@@ -139,12 +156,15 @@ claude-plain              # plain Claude Code, always
 ```
 
 A window holds one Claude session per tab, in the directory you started it
-from; `Ctrl+T` opens a fresh Claude in a new tab. On Linux, when `cargo` is
-installed, `install.sh` builds the window (`shell/`, Rust + WebKitGTK):
-see-through, with KWin blurring the desktop behind it on KDE Plasma. Without
-it the page opens as a Chromium app window. While the window is open, the
-terminal you typed `claude` in is hidden (on Plasma) and comes back when the
-window's last Claude exits.
+from; `Ctrl+T` opens a fresh Claude in a new tab. When `cargo` is
+installed, `install.sh` builds the window (`shell/`, Rust + Tauri) on Linux
+and macOS: see-through, with the desktop blurred behind it — by KWin on KDE
+Plasma, by the system's own vibrancy on a Mac. Where nothing can blur (another
+Linux desktop, X11) the window is drawn 90% opaque instead. Without `cargo`
+the page opens as a Chromium app window. While the window is open, the
+terminal you typed `claude` in is hidden (on Plasma). Closing the window
+closes that terminal too; Claude Code exiting by itself (Ctrl+C twice,
+`/exit`) brings it back.
 
 | Setting | |
 |---|---|
@@ -152,6 +172,7 @@ window's last Claude exits.
 | `CLAUDE_CHATVIEW_SHELL=off` | Chromium instead of the see-through window |
 | `CLAUDE_CHATVIEW_BLUR=off` | a clear tint, no blur behind the window |
 | `CLAUDE_CHATVIEW_HIDE_TERMINAL=off` | leave the terminal where it is |
+| `CLAUDE_CHATVIEW_TRACE=1` | log how long each step of starting up takes |
 
 | Key | |
 |---|---|
@@ -166,7 +187,7 @@ window's last Claude exits.
 
 - Long prompts are sent as a paste, so nothing is lost.
 - Reloading the window is fine — the session keeps running and the screen is
-  restored. Closing it stops Claude Code about 10 seconds later.
+  restored. Closing it stops Claude Code right away.
 - When a tab's Claude Code exits, the tab says so and closes (after a clean
   exit); `claude-chatview` exits once every tab's Claude has, with the last
   exit code.
